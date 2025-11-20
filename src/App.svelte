@@ -14,6 +14,13 @@
   let itemSize = 160;
   let gap = 16;
   let registerValues = new Map(); // Store register values by number
+  let isScrolling = false;
+  let scrollTimeout = null;
+  let scrollTimeoutMs = 1500;
+  let gridContainerElement = null;
+  let lastScrollPosition = 0;
+  let scrollCheckInterval = null;
+  let isPointerDown = false;
 
   // Configurable target FPS
   let targetFPS = 60;
@@ -25,7 +32,7 @@
 
   // Throttled render loop: Updates store only at target FPS
   function renderLoop(currentTime) {
-    if (currentTime - lastRenderTime >= frameInterval && pendingUpdates) {
+    if (!isScrolling && currentTime - lastRenderTime >= frameInterval && pendingUpdates) {
       // Update individual register values from changes
       for (const regData of pendingUpdates) {
         registerValues.set(regData.number, regData.value);
@@ -36,6 +43,45 @@
       lastRenderTime = currentTime;
     }
     rafId = requestAnimationFrame(renderLoop);
+  }
+
+  function handleScroll() {
+    isScrolling = true;
+    // Clear existing timeout if user is still scrolling
+    if (scrollTimeout) clearTimeout(scrollTimeout);
+    // Set timeout to detect when scrolling has stopped
+    scrollTimeout = setTimeout(() => {
+      // Only resume updates if pointer is not down (scrollbar is released)
+      if (!isPointerDown) {
+        isScrolling = false;
+      }
+      scrollTimeout = null;
+    }, scrollTimeoutMs);
+  }
+
+  function handlePointerDown() {
+    isPointerDown = true;
+    handleScroll(); // Pause updates immediately when pointer down
+  }
+
+  function handlePointerUp() {
+    isPointerDown = false;
+    // If still scrolling, let the timeout resume updates
+    // If not scrolling anymore, resume updates immediately
+    if (!isScrolling) {
+      isScrolling = false;
+    }
+  }
+
+  function calculateGridHeight() {
+    if (!gridContainerElement) return;
+    // Get the position of the grid from the top of the viewport
+    const rect = gridContainerElement.getBoundingClientRect();
+    // Calculate available height: viewport height minus the grid's top position
+    // This ensures the grid fits exactly within the remaining viewport
+    const availableHeight = window.innerHeight - rect.top;
+    // Set grid height to available space (no overflow)
+    gridHeight = Math.max(200, availableHeight);
   }
 
   function handleDeviceChange(event) {
@@ -71,6 +117,19 @@
       rafId = requestAnimationFrame(renderLoop);
       // Initial subscribe
       subscribeToDevice(selectedDevice);
+      
+      // Calculate initial grid height
+      setTimeout(() => calculateGridHeight(), 100);
+      
+      // Set up window resize listener
+      const handleWindowResize = () => {
+        calculateGridHeight();
+      };
+      window.addEventListener('resize', handleWindowResize);
+      
+      return () => {
+        window.removeEventListener('resize', handleWindowResize);
+      };
     } catch (e) {
       error = 'Failed to initialize shared worker: ' + e.message;
     }
@@ -82,6 +141,9 @@
     }
     if (rafId) {
       cancelAnimationFrame(rafId);
+    }
+    if (scrollTimeout) {
+      clearTimeout(scrollTimeout);
     }
   });
 
@@ -119,27 +181,45 @@
         <option value={30}>30 FPS</option>
         <option value={60}>60 FPS</option>
       </select>
+
+      <label for="scroll-timeout-input">Scroll Pause (ms):</label>
+      <input
+        id="scroll-timeout-input"
+        type="number"
+        bind:value={scrollTimeoutMs}
+        min="0"
+        max="5000"
+        step="100"
+      />
     </div>
 
     {#if $registers.length === 0}
       <div class="loading">Loading device data...</div>
     {:else}
-      <Grid
-        itemCount={$registers.length}
-        itemHeight={itemSize + gap}
-        itemWidth={itemSize + gap}
-        height={gridHeight}
-        overscan={2}
+      <div 
+        class="grid-wrapper" 
+        bind:this={gridContainerElement} 
+        style="height: {gridHeight}px;"
+        on:wheel={handleScroll}
+        on:scroll={handleScroll}
       >
-        {#snippet item({ index, style })}
-          <div class="gauge-wrapper" {style}>
-            <RadialGauge
-              registerNumber={index}
-              value={$registers[index]}
-            />
-          </div>
-        {/snippet}
-      </Grid>
+        <Grid
+          itemCount={$registers.length}
+          itemHeight={itemSize + gap}
+          itemWidth={itemSize + gap}
+          height={gridHeight}
+          overscan={2}
+        >
+          {#snippet item({ index, style })}
+            <div class="gauge-wrapper" {style}>
+              <RadialGauge
+                registerNumber={index}
+                value={$registers[index]}
+              />
+            </div>
+          {/snippet}
+        </Grid>
+      </div>
     {/if}
   {:else}
     <div class="loading">Initializing shared worker...</div>
@@ -196,7 +276,8 @@
     color: #333;
   }
 
-  select {
+  select,
+  input[type='number'] {
     padding: 8px 12px;
     border: 1px solid #ccc;
     border-radius: 4px;
@@ -204,11 +285,18 @@
     cursor: pointer;
   }
 
-  select:hover {
+  input[type='number'] {
+    cursor: text;
+    width: 100px;
+  }
+
+  select:hover,
+  input[type='number']:hover {
     border-color: #999;
   }
 
-  select:focus {
+  select:focus,
+  input[type='number']:focus {
     outline: none;
     border-color: #0066cc;
     box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.1);
@@ -232,6 +320,13 @@
     color: #666;
     padding: 40px;
     font-size: 16px;
+  }
+
+  .grid-wrapper {
+    background: white;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
   }
 
   .gauge-wrapper {
