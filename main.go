@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"sync"
 	"syscall/js"
+	"time"
 )
 
 // Message represents a message passed between tabs and the worker
@@ -24,6 +27,32 @@ type Response struct {
 	Error     string          `json:"error,omitempty"`
 }
 
+// Register represents a single register with internal and published values
+type Register struct {
+	Published      int     `json:"published"`
+	Internal       float64 `json:"internal"`
+	IncDec         float64 `json:"incDec"`
+	PrevPublished  int     `json:"prevPublished"`
+}
+
+// Device represents a device with registers
+type Device struct {
+	ID        int         `json:"id"`
+	Registers []Register  `json:"registers"`
+}
+
+// RegisterData is the public register data sent to clients (only what's needed for display)
+type RegisterData struct {
+	Number int `json:"number"`
+	Value  int `json:"value"`
+}
+
+// DeviceData is the data structure sent to subscribers
+type DeviceData struct {
+	ID        int             `json:"id"`
+	Registers []RegisterData  `json:"registers"`
+}
+
 // Subscription represents a client's subscription to a channel
 type Subscription struct {
 	ClientID string
@@ -34,6 +63,9 @@ type Subscription struct {
 type SharedWorker struct {
 	subscriptions map[string][]Subscription
 	dataStore     map[string]json.RawMessage
+	devices       map[int]*Device // Device ID -> Device
+	ticker        *time.Ticker
+	stopChan      chan bool
 	mu            sync.RWMutex
 }
 
@@ -43,6 +75,116 @@ func init() {
 	worker = &SharedWorker{
 		subscriptions: make(map[string][]Subscription),
 		dataStore:     make(map[string]json.RawMessage),
+		devices:       make(map[int]*Device),
+		stopChan:      make(chan bool),
+	}
+	
+	// Initialize devices
+	rand.Seed(time.Now().UnixNano())
+	for deviceID := 1; deviceID <= 2; deviceID++ {
+		device := &Device{
+			ID:        deviceID,
+			Registers: make([]Register, 1000),
+		}
+		// Initialize registers with random values and incDec
+		for i := 0; i < 1000; i++ {
+			published := rand.Intn(100) + 1
+			incDec := (rand.Float64() * 4) - 2 // Random between -2.0 and 2.0
+			
+			// Force small values to be 0.1 or -0.1
+			if incDec > -0.1 && incDec < 0.1 {
+				if incDec < 0 {
+					incDec = -0.1
+				} else {
+					incDec = 0.1
+				}
+			}
+			
+			device.Registers[i] = Register{
+				Published:     published,
+				Internal:      float64(published),
+				IncDec:        incDec,
+				PrevPublished: published,
+			}
+		}
+		worker.devices[deviceID] = device
+	}
+	
+	// Start publishing devices
+	go worker.StartPublishing()
+}
+
+// UpdateDevice updates the registers of a device and publishes only changed values
+func (sw *SharedWorker) UpdateDevice(deviceID int) {
+	sw.mu.Lock()
+	device, ok := sw.devices[deviceID]
+	sw.mu.Unlock()
+	
+	if !ok {
+		return
+	}
+	
+	sw.mu.Lock()
+	changedRegisters := []RegisterData{}
+	
+	// Update internal values and track changes
+	for i := 0; i < len(device.Registers); i++ {
+		// Add incDec to internal value
+		device.Registers[i].Internal += device.Registers[i].IncDec
+		
+		// Calculate new published value (floor of internal)
+		newPublished := int(device.Registers[i].Internal)
+		
+		// Wrap values to keep them in 1-100 range
+		if newPublished > 100 {
+			newPublished = 1
+			device.Registers[i].Internal = 1
+		} else if newPublished < 1 {
+			newPublished = 100
+			device.Registers[i].Internal = 100
+		}
+		
+		// Only include if published value changed
+		if newPublished != device.Registers[i].Published {
+			device.Registers[i].Published = newPublished
+			changedRegisters = append(changedRegisters, RegisterData{
+				Number: i,
+				Value:  newPublished,
+			})
+		}
+	}
+	
+	// Only publish if there are changes
+	if len(changedRegisters) > 0 {
+		// Marshal only changed registers
+		deviceData := DeviceData{
+			ID:        deviceID,
+			Registers: changedRegisters,
+		}
+		data, _ := json.Marshal(deviceData)
+		sw.mu.Unlock()
+		
+		// Publish to channel
+		channel := fmt.Sprintf("device_%d", deviceID)
+		sw.Publish(channel, data)
+	} else {
+		sw.mu.Unlock()
+	}
+}
+
+// StartPublishing starts the publishing loop that updates devices every 100ms
+func (sw *SharedWorker) StartPublishing() {
+	sw.ticker = time.NewTicker(100 * time.Millisecond)
+	defer sw.ticker.Stop()
+	
+	for {
+		select {
+		case <-sw.ticker.C:
+			sw.UpdateDevice(1)
+			sw.UpdateDevice(2)
+		case <-sw.stopChan:
+			return
+		}
 	}
 }
 

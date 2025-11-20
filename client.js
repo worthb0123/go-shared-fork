@@ -3,14 +3,11 @@
 
 export class SharedWorkerClient {
   constructor(workerUrl = './worker.js') {
-    console.log('Creating SharedWorkerClient');
     this.worker = new SharedWorker(workerUrl);
     this.port = this.worker.port;
     this.requestId = 0;
     this.pendingRequests = new Map();
     this.subscriptions = new Map();
-    
-    console.log('SharedWorker created, setting up port');
     
     // Set up message handler
     this.port.onmessage = (event) => this.handleMessage(event);
@@ -18,8 +15,6 @@ export class SharedWorkerClient {
       console.error('Port message error:', event);
     };
     this.port.start();
-    
-    console.log('SharedWorkerClient initialized');
   }
 
   /**
@@ -147,7 +142,6 @@ export class SharedWorkerClient {
    * @private
    */
   handleMessage(event) {
-    console.log('Client received:', event.data);
     let message;
     try {
       message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
@@ -155,8 +149,6 @@ export class SharedWorkerClient {
       console.error('Failed to parse message:', e);
       return;
     }
-
-    console.log('Parsed message:', message, 'Pending requests:', this.pendingRequests.size);
 
     // Handle pending requests
     if (message.requestId !== undefined && this.pendingRequests.has(message.requestId)) {
