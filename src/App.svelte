@@ -13,11 +13,11 @@
   let gridHeight = 800;
   let itemSize = 160;
   let gap = 16;
-  let registerValues = new Map(); // Store register values by number
+  let registerValues = []; // Store register values by number (array index)
   let isScrolling = false;
   let scrollTimeout = null;
-  let scrollTimeoutMs = 1500;
-  let gridContainerElement = null;
+  let scrollTimeoutMs = 300;
+  // let gridContainerElement = null; // Removed
   let lastScrollPosition = 0;
   let scrollCheckInterval = null;
   let isPointerDown = false;
@@ -35,10 +35,10 @@
     if (!isScrolling && currentTime - lastRenderTime >= frameInterval && pendingUpdates) {
       // Update individual register values from changes
       for (const regData of pendingUpdates) {
-        registerValues.set(regData.number, regData.value);
+        registerValues[regData.number] = regData.value;
       }
       // Update the store with a new array to trigger reactivity
-      registers.set(Array.from(registerValues.values()));
+      registers.set(registerValues);
       pendingUpdates = null;
       lastRenderTime = currentTime;
     }
@@ -66,22 +66,12 @@
 
   function handlePointerUp() {
     isPointerDown = false;
-    // If still scrolling, let the timeout resume updates
-    // If not scrolling anymore, resume updates immediately
-    if (!isScrolling) {
+    // If no scroll timeout is active, it means we either weren't scrolling 
+    // or the timeout expired while the pointer was down. 
+    // In either case, we should ensure updates are resumed.
+    if (!scrollTimeout) {
       isScrolling = false;
     }
-  }
-
-  function calculateGridHeight() {
-    if (!gridContainerElement) return;
-    // Get the position of the grid from the top of the viewport
-    const rect = gridContainerElement.getBoundingClientRect();
-    // Calculate available height: viewport height minus the grid's top position
-    // This ensures the grid fits exactly within the remaining viewport
-    const availableHeight = window.innerHeight - rect.top;
-    // Set grid height to available space (no overflow)
-    gridHeight = Math.max(200, availableHeight);
   }
 
   function handleDeviceChange(event) {
@@ -102,8 +92,7 @@
     unsubscribe = client.subscribe(channel, (data) => {
       try {
         // Data is already parsed by client.js
-        const deviceData = typeof data === 'string' ? JSON.parse(data) : data;
-        pendingUpdates = deviceData.registers;
+        pendingUpdates = data.registers;
       } catch (e) {
         console.error('Error processing device data:', e);
       }
@@ -117,19 +106,6 @@
       rafId = requestAnimationFrame(renderLoop);
       // Initial subscribe
       subscribeToDevice(selectedDevice);
-      
-      // Calculate initial grid height
-      setTimeout(() => calculateGridHeight(), 100);
-      
-      // Set up window resize listener
-      const handleWindowResize = () => {
-        calculateGridHeight();
-      };
-      window.addEventListener('resize', handleWindowResize);
-      
-      return () => {
-        window.removeEventListener('resize', handleWindowResize);
-      };
     } catch (e) {
       error = 'Failed to initialize shared worker: ' + e.message;
     }
@@ -151,6 +127,8 @@
     subscribeToDevice(selectedDevice);
   }
 </script>
+
+<svelte:window on:pointerup={handlePointerUp} />
 
 <main>
   <h1>Device Register Monitor</h1>
@@ -198,10 +176,10 @@
     {:else}
       <div 
         class="grid-wrapper" 
-        bind:this={gridContainerElement} 
-        style="height: {gridHeight}px;"
+        bind:clientHeight={gridHeight}
         on:wheel={handleScroll}
-        on:scroll={handleScroll}
+        on:scroll|capture={handleScroll}
+        on:pointerdown={handlePointerDown}
       >
         <Grid
           itemCount={$registers.length}
@@ -214,7 +192,7 @@
             <div class="gauge-wrapper" {style}>
               <RadialGauge
                 registerNumber={index}
-                value={$registers[index]}
+                value={$registers[index] ?? 0}
               />
             </div>
           {/snippet}
@@ -327,6 +305,8 @@
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     overflow: hidden;
+    flex: 1;
+    min-height: 0;
   }
 
   .gauge-wrapper {

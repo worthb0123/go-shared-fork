@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"syscall/js"
 	"time"
@@ -188,22 +189,68 @@ func (sw *SharedWorker) StartPublishing() {
 	}
 }
 
+// GetDeviceSnapshot returns a full snapshot of a device's registers
+func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, error) {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+
+	device, ok := sw.devices[deviceID]
+	if !ok {
+		return nil, fmt.Errorf("device not found")
+	}
+
+	allRegisters := make([]RegisterData, len(device.Registers))
+	for i, reg := range device.Registers {
+		allRegisters[i] = RegisterData{
+			Number: i,
+			Value:  reg.Published,
+		}
+	}
+
+	deviceData := DeviceData{
+		ID:        deviceID,
+		Registers: allRegisters,
+	}
+
+	return json.Marshal(deviceData)
+}
+
 // Subscribe adds a client to a channel's subscription list
 func (sw *SharedWorker) Subscribe(clientID string, channel string, port js.Value) Response {
 	sw.mu.Lock()
-	defer sw.mu.Unlock()
-
 	sw.subscriptions[channel] = append(sw.subscriptions[channel], Subscription{
 		ClientID: clientID,
 		Port:     port,
 	})
+	sw.mu.Unlock()
 
 	// Send current data if available
-	if data, ok := sw.dataStore[channel]; ok {
+	// For devices, send a full snapshot. For others, use dataStore.
+	var initialData json.RawMessage
+	var err error
+
+	if strings.HasPrefix(channel, "device_") {
+		var deviceID int
+		if _, scanErr := fmt.Sscanf(channel, "device_%d", &deviceID); scanErr == nil {
+			initialData, err = sw.GetDeviceSnapshot(deviceID)
+			if err != nil {
+				// Log error or ignore? For now, if device not found, we send nothing
+				initialData = nil
+			}
+		}
+	} else {
+		sw.mu.RLock()
+		if data, ok := sw.dataStore[channel]; ok {
+			initialData = data
+		}
+		sw.mu.RUnlock()
+	}
+
+	if initialData != nil {
 		response := Response{
 			Type:    "data",
 			Channel: channel,
-			Data:    data,
+			Data:    initialData,
 		}
 		sw.sendToPort(port, response)
 	}
