@@ -21,9 +21,10 @@ export class SharedWorkerClient {
    * Subscribe to a channel and receive updates
    * @param {string} channel - The channel name
    * @param {Function} callback - Called when data is received
+   * @param {number} fps - Requested FPS for this subscription
    * @returns {Function} Unsubscribe function
    */
-  subscribe(channel, callback) {
+  subscribe(channel, callback, fps = 60) {
     if (!this.subscriptions.has(channel)) {
       this.subscriptions.set(channel, new Set());
     }
@@ -34,7 +35,8 @@ export class SharedWorkerClient {
     // Send subscribe message
     this.send({
       type: 'subscribe',
-      channel: channel
+      channel: channel,
+      fps: fps
     });
 
     // Return unsubscribe function

@@ -17,6 +17,7 @@ type Message struct {
 	Channel   string          `json:"channel"`
 	Data      json.RawMessage `json:"data"`
 	RequestID int             `json:"requestId"`
+	FPS       int             `json:"fps"` // Requested FPS
 }
 
 // Response represents a response sent back to clients
@@ -50,14 +51,16 @@ type RegisterData struct {
 
 // DeviceData is the data structure sent to subscribers
 type DeviceData struct {
-	ID        int             `json:"id"`
-	Registers []RegisterData  `json:"registers"`
+	ID        int   `json:"id"`
+	Registers []int `json:"registers"`
 }
 
 // Subscription represents a client's subscription to a channel
 type Subscription struct {
-	ClientID string
-	Port     js.Value
+	ClientID       string
+	Port           js.Value
+	TargetInterval time.Duration
+	LastSent       time.Time
 }
 
 // SharedWorker manages subscriptions and broadcasts data to subscribed clients
@@ -85,10 +88,10 @@ func init() {
 	for deviceID := 1; deviceID <= 2; deviceID++ {
 		device := &Device{
 			ID:        deviceID,
-			Registers: make([]Register, 1000),
+			Registers: make([]Register, 10000),
 		}
 		// Initialize registers with random values and incDec
-		for i := 0; i < 1000; i++ {
+		for i := 0; i < 10000; i++ {
 			published := rand.Intn(100) + 1
 			incDec := (rand.Float64() * 4) - 2 // Random between -2.0 and 2.0
 			
@@ -112,30 +115,34 @@ func init() {
 	}
 	
 	// Start publishing devices
-	go worker.StartPublishing()
+	go worker.StartPhysicsLoop()
 }
 
-// UpdateDevice updates the registers of a device and publishes only changed values
-func (sw *SharedWorker) UpdateDevice(deviceID int) {
+// UpdatePhysics updates the internal state of a device (physics only)
+func (sw *SharedWorker) UpdatePhysics(deviceID int) {
 	sw.mu.Lock()
 	device, ok := sw.devices[deviceID]
 	sw.mu.Unlock()
-	
+
 	if !ok {
 		return
 	}
-	
+
 	sw.mu.Lock()
-	changedRegisters := []RegisterData{}
-	
-	// Update internal values and track changes
+	defer sw.mu.Unlock()
+
+	// Physics runs at 10Hz (100ms)
+	// Previously IncDec was added every 100ms.
+	// To maintain speed: IncDec * 1.0
+	dtFactor := 1.0
+
 	for i := 0; i < len(device.Registers); i++ {
 		// Add incDec to internal value
-		device.Registers[i].Internal += device.Registers[i].IncDec
-		
+		device.Registers[i].Internal += device.Registers[i].IncDec * dtFactor
+
 		// Calculate new published value (floor of internal)
 		newPublished := int(device.Registers[i].Internal)
-		
+
 		// Wrap values to keep them in 1-100 range
 		if newPublished > 100 {
 			newPublished = 1
@@ -144,47 +151,94 @@ func (sw *SharedWorker) UpdateDevice(deviceID int) {
 			newPublished = 100
 			device.Registers[i].Internal = 100
 		}
-		
-		// Only include if published value changed
-		if newPublished != device.Registers[i].Published {
-			device.Registers[i].Published = newPublished
-			changedRegisters = append(changedRegisters, RegisterData{
-				Number: i,
-				Value:  newPublished,
-			})
-		}
-	}
-	
-	// Only publish if there are changes
-	if len(changedRegisters) > 0 {
-		// Marshal only changed registers
-		deviceData := DeviceData{
-			ID:        deviceID,
-			Registers: changedRegisters,
-		}
-		data, _ := json.Marshal(deviceData)
-		sw.mu.Unlock()
-		
-		// Publish to channel
-		channel := fmt.Sprintf("device_%d", deviceID)
-		sw.Publish(channel, data)
-	} else {
-		sw.mu.Unlock()
+
+		device.Registers[i].Published = newPublished
 	}
 }
 
-// StartPublishing starts the publishing loop that updates devices every 100ms
-func (sw *SharedWorker) StartPublishing() {
-	sw.ticker = time.NewTicker(100 * time.Millisecond)
-	defer sw.ticker.Stop()
-	
+// StartPhysicsLoop starts the physics simulation loop at 10Hz
+func (sw *SharedWorker) StartPhysicsLoop() {
+	// 10 FPS = 100ms
+	ticker := time.NewTicker(100 * time.Millisecond)
+	broadcastTicker := time.NewTicker(10 * time.Millisecond) // Check broadcast queue often
+
+	go func() {
+		for {
+			select {
+			case <-broadcastTicker.C:
+				sw.Broadcast()
+			case <-sw.stopChan:
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
-		case <-sw.ticker.C:
-			sw.UpdateDevice(1)
-			sw.UpdateDevice(2)
+		case <-ticker.C:
+			sw.UpdatePhysics(1)
+			sw.UpdatePhysics(2)
 		case <-sw.stopChan:
+			ticker.Stop()
+			broadcastTicker.Stop()
 			return
+		}
+	}
+}
+
+// Broadcast checks all subscriptions and sends updates if needed
+func (sw *SharedWorker) Broadcast() {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	now := time.Now()
+
+	for channel, subs := range sw.subscriptions {
+		// Only handle device channels for now
+		if !strings.HasPrefix(channel, "device_") {
+			continue
+		}
+
+		var deviceID int
+		if _, err := fmt.Sscanf(channel, "device_%d", &deviceID); err != nil {
+			continue
+		}
+		
+		device, ok := sw.devices[deviceID]
+		if !ok {
+			continue
+		}
+
+		// Pre-calculate snapshot for this device to avoid repeated allocation
+		// We only marshal if at least one subscriber needs it
+		var cachedSnapshot []byte
+
+		for i := range subs {
+			sub := &subs[i] // Pointer to update LastSent
+			if now.Sub(sub.LastSent) >= sub.TargetInterval {
+				
+				// Generate snapshot if not already done
+				if cachedSnapshot == nil {
+					allRegisters := make([]int, len(device.Registers))
+					for r := range device.Registers {
+						allRegisters[r] = device.Registers[r].Published
+					}
+					deviceData := DeviceData{
+						ID:        deviceID,
+						Registers: allRegisters,
+					}
+					cachedSnapshot, _ = json.Marshal(deviceData)
+				}
+
+				// Send
+				response := Response{
+					Type:    "data",
+					Channel: channel,
+					Data:    cachedSnapshot,
+				}
+				sw.sendToPort(sub.Port, response)
+				sub.LastSent = now
+			}
 		}
 	}
 }
@@ -199,12 +253,9 @@ func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, error) {
 		return nil, fmt.Errorf("device not found")
 	}
 
-	allRegisters := make([]RegisterData, len(device.Registers))
+	allRegisters := make([]int, len(device.Registers))
 	for i, reg := range device.Registers {
-		allRegisters[i] = RegisterData{
-			Number: i,
-			Value:  reg.Published,
-		}
+		allRegisters[i] = reg.Published
 	}
 
 	deviceData := DeviceData{
@@ -216,11 +267,24 @@ func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, error) {
 }
 
 // Subscribe adds a client to a channel's subscription list
-func (sw *SharedWorker) Subscribe(clientID string, channel string, port js.Value) Response {
+func (sw *SharedWorker) Subscribe(clientID string, channel string, port js.Value, fps int) Response {
 	sw.mu.Lock()
+	
+	// Max cap at 10 FPS (100ms) for physics loop
+	if fps > 10 {
+		fps = 10
+	}
+	
+	interval := time.Second / 10 // Default 10 FPS
+	if fps > 0 {
+		interval = time.Second / time.Duration(fps)
+	}
+
 	sw.subscriptions[channel] = append(sw.subscriptions[channel], Subscription{
-		ClientID: clientID,
-		Port:     port,
+		ClientID:       clientID,
+		Port:           port,
+		TargetInterval: interval,
+		LastSent:       time.Now(), // Start now
 	})
 	sw.mu.Unlock()
 
@@ -393,7 +457,7 @@ func HandleConnect(this js.Value, args []js.Value) interface{} {
 		resp.RequestID = msg.RequestID
 
 		if msg.Type == "subscribe" {
-			resp = worker.Subscribe(clientID, msg.Channel, port)
+			resp = worker.Subscribe(clientID, msg.Channel, port, msg.FPS)
 		} else if msg.Type == "unsubscribe" {
 			resp = worker.Unsubscribe(clientID, msg.Channel)
 		} else if msg.Type == "publish" {

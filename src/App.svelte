@@ -33,11 +33,13 @@
   // Throttled render loop: Updates store only at target FPS
   function renderLoop(currentTime) {
     if (!isScrolling && currentTime - lastRenderTime >= frameInterval && pendingUpdates) {
-      // Update individual register values from changes
-      for (const regData of pendingUpdates) {
-        registerValues[regData.number] = regData.value;
-      }
-      // Update the store with a new array to trigger reactivity
+      // Update register values from flat array
+      // Since pendingUpdates is now just [val0, val1, ...], and we want to
+      // update our local state, we can just replace the array or copy values.
+      // Replacing is faster and safe since we are just displaying values.
+      registerValues = pendingUpdates;
+      
+      // Update the store
       registers.set(registerValues);
       pendingUpdates = null;
       lastRenderTime = currentTime;
@@ -92,11 +94,12 @@
     unsubscribe = client.subscribe(channel, (data) => {
       try {
         // Data is already parsed by client.js
+        // data.registers is now a flat array of integers
         pendingUpdates = data.registers;
       } catch (e) {
         console.error('Error processing device data:', e);
       }
-    });
+    }, targetFPS);
   }
 
   onMount(async () => {
@@ -123,7 +126,7 @@
     }
   });
 
-  $: if (client && selectedDevice) {
+  $: if (client && selectedDevice && targetFPS) {
     subscribeToDevice(selectedDevice);
   }
 </script>
