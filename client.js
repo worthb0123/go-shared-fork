@@ -189,7 +189,7 @@ export class SharedWorkerClient {
     }
 
     // Handle subscriptions
-    if (message.type === 'data' && message.channel) {
+    if ((message.type === 'data' || message.type === 'config') && message.channel) {
       const callbacks = this.subscriptions.get(message.channel);
       if (callbacks) {
         callbacks.forEach(callback => {

@@ -6,6 +6,7 @@
   export let gap = 16;
   export let height = 800;
   export let data = []; // Array of values
+  export let configs = []; // Array of config objects
   
   let canvas;
   let ctx;
@@ -52,46 +53,242 @@
     requestRender();
   }
 
+  // Gauge constants
+  const minAngle = -100;
+  const maxAngle = 100;
+  const startAngleRad = (minAngle - 90) * Math.PI / 180;
+  const endAngleRad = (maxAngle - 90) * Math.PI / 180;
+  
+  // Helper to map value to angle
+  function getAngle(value, min, max) {
+    const ratio = (value - min) / (max - min);
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    return ((clampedRatio * (maxAngle - minAngle)) + minAngle - 90) * Math.PI / 180;
+  }
+
   function drawGauge(ctx, x, y, size, value, index) {
     const cx = x + size / 2;
     const cy = y + size / 2;
-    const radius = size / 2 - 5; // 5 is half stroke width
-    const startAngle = -Math.PI / 2;
+    // Scale internal drawing to match the 100x100 coordinate system of the SVG
+    const scale = size / 100;
     
-    // Background Circle
+    // Get config or defaults
+    const config = configs[index] || {};
+    const minVal = config.displayMin ?? 0;
+    const maxVal = config.displayMax ?? 100;
+    const lowWarn = config.lowWarn ?? 10;
+    const highWarn = config.highWarn ?? 90;
+    const lowFault = config.lowFault ?? 5;
+    const highFault = config.highFault ?? 95;
+    const baseColor = config.color ?? '#f59e0b'; // Default amber if no color
+
+    // Configuration
+    const highlightColor = baseColor; 
+    // Reduce scale for internal elements to create clearance
+    const innerScale = scale * 0.92; 
+    
+    // Transform context to gauge top-left to make math easier? 
+    // Or just work with offset. Let's work with offset.
+    // Actually, translating the context is cleaner.
+    ctx.save();
+    ctx.translate(x, y);
+    
+    // --- 1. Background & Rim ---
+    // Outer Rim Body
     ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
-    ctx.strokeStyle = colorBg;
-    ctx.lineWidth = 10;
+    ctx.arc(50 * scale, 50 * scale, 48 * scale, 0, 2 * Math.PI);
+    ctx.fillStyle = '#1a1c21'; // Dark background
+    ctx.fill();
+    
+    // Background Glow (Restricted to Gauge Arc)
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(50 * scale, 63 * scale); // Pivot
+    // Arc from minAngle to maxAngle at a large radius
+    ctx.arc(50 * scale, 63 * scale, 60 * scale, startAngleRad, endAngleRad); 
+    ctx.closePath();
+    ctx.clip(); // Restrict drawing to this wedge
+
+    const gradient = ctx.createRadialGradient(50 * scale, 63 * scale, 10 * scale, 50 * scale, 63 * scale, 45 * scale);
+    
+    // Convert hex baseColor to rgba for gradient
+    // Quick hex to rgb conversion
+    let r=245, g=158, b=11;
+    if (baseColor.startsWith('#')) {
+        const hex = baseColor.substring(1);
+        if (hex.length === 6) {
+            r = parseInt(hex.substr(0,2), 16);
+            g = parseInt(hex.substr(2,2), 16);
+            b = parseInt(hex.substr(4,2), 16);
+        }
+    }
+    
+    gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.25)`); // Sharper/Brighter center
+    gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);   // Fade out
+    ctx.fillStyle = gradient;
+    // Fill a large rect to cover the clipped area
+    ctx.fillRect(0, 0, 100 * scale, 100 * scale);
+    ctx.restore(); // Remove clip
+    
+    // Outer "Metallic" Bevel Rim
+    // Simulating top-left light source
+    const rimGradient = ctx.createLinearGradient(0, 0, 100 * scale, 100 * scale);
+    rimGradient.addColorStop(0, '#999'); // Highlight top-left (Lighter)
+    rimGradient.addColorStop(0.5, '#222');
+    rimGradient.addColorStop(1, '#000'); // Shadow bottom-right
+    
+    ctx.beginPath();
+    ctx.arc(50 * scale, 50 * scale, 48 * scale, 0, 2 * Math.PI);
+    ctx.strokeStyle = rimGradient;
+    ctx.lineWidth = 2.5 * scale;
     ctx.stroke();
 
-    // Value Arc
-    const percentage = Math.max(0, Math.min(100, value));
-    const endAngle = startAngle + (2 * Math.PI * (percentage / 100));
-    
-    let color = colorGreen;
-    if (percentage >= 33) color = colorYellow;
-    if (percentage >= 66) color = colorRed;
-
+    // Inner Highlight Ring (Colored circle inside the rim)
     ctx.beginPath();
-    ctx.arc(cx, cy, radius, startAngle, endAngle);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 10;
+    ctx.arc(50 * scale, 50 * scale, 46 * scale, 0, 2 * Math.PI);
+    ctx.strokeStyle = highlightColor;
+    ctx.lineWidth = 0.75 * scale; 
     ctx.stroke();
 
-    // Text
+    // --- 2. Active/Warning Range Arcs ---
+    // Use innerScale for these to shrink them away from the rim
+    const arcR = 35 * innerScale; // Radius for the colored bars
+    ctx.lineCap = 'butt';
+    ctx.lineWidth = 3 * innerScale;
+    
+    // Helper to draw arc segment
+    function drawRangeArc(startVal, endVal, color) {
+        if (startVal >= endVal) return;
+        const startRad = getAngle(startVal, minVal, maxVal);
+        const endRad = getAngle(endVal, minVal, maxVal);
+        ctx.beginPath();
+        // Use scaled pivot center
+        ctx.arc(50 * scale, 63 * scale, arcR, startRad, endRad);
+        ctx.strokeStyle = color;
+        ctx.stroke();
+    }
+
+    // Draw ranges
+    // Low Fault (Min to LowFault)
+    if (lowFault > minVal) drawRangeArc(minVal, lowFault, '#ef4444');
+    // Low Warn (LowFault to LowWarn)
+    if (lowWarn > lowFault) drawRangeArc(lowFault, lowWarn, '#f59e0b');
+    
+    // High Warn (HighWarn to HighFault)
+    if (highFault > highWarn) drawRangeArc(highWarn, highFault, '#f59e0b');
+    // High Fault (HighFault to Max)
+    if (maxVal > highFault) drawRangeArc(highFault, maxVal, '#ef4444');
+    
+    // --- 3. Ticks ---
+    const gr1 = 28 * innerScale; // Inner radius 
+    const gr2 = 32 * innerScale; // Outer radius
+    const tickCenter = { x: 50 * scale, y: 63 * scale };
+    
+    ctx.strokeStyle = '#A9ABAF';
+    ctx.lineWidth = 1 * innerScale; 
+    
+    // Draw major ticks
+    // Calculate step based on range
+    const range = maxVal - minVal;
+    let step = 20;
+    if (range <= 10) step = 1;
+    else if (range <= 50) step = 5;
+    else if (range <= 100) step = 10;
+    else step = 20;
+
+    for (let val = minVal; val <= maxVal; val += step) {
+        const angle = getAngle(val, minVal, maxVal); // Returns radians
+        // wait, getAngle returns radians.
+        // existing code expected angle in degrees loop?
+        // "for (let ang = minAngle; ang <= maxAngle; ang += 20)"
+        // Yes, existing code iterated angles. Now we iterate values.
+        
+        const x1 = tickCenter.x + gr1 * Math.cos(angle);
+        const y1 = tickCenter.y + gr1 * Math.sin(angle);
+        const x2 = tickCenter.x + gr2 * Math.cos(angle);
+        const y2 = tickCenter.y + gr2 * Math.sin(angle);
+        
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+    }
+
+    // --- 4. Labels ---
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#A9ABAF'; 
     
-    // Value
-    ctx.font = 'bold 18px system-ui, sans-serif';
-    ctx.fillStyle = colorText;
-    ctx.fillText(Math.floor(value), cx, cy);
+    // Min/Max - positioned relative to the arc start/end
+    // Calculate pos based on minAngle/maxAngle radii
+    const labelR = 22 * innerScale; // Closer to center
+    // Min
+    let rad = (minAngle - 90) * Math.PI / 180;
+    ctx.font = `${8 * innerScale}px system-ui, sans-serif`;
+    ctx.fillText(Math.round(minVal), tickCenter.x + labelR * Math.cos(rad) + 2*scale, tickCenter.y + labelR * Math.sin(rad) - 2*scale);
+    // Max
+    rad = (maxAngle - 90) * Math.PI / 180;
+    ctx.fillText(Math.round(maxVal), tickCenter.x + labelR * Math.cos(rad) - 2*scale, tickCenter.y + labelR * Math.sin(rad) - 2*scale);
+
+    // Value (Main)
+    ctx.fillStyle = '#E8E6E7'; 
+    ctx.font = `bold ${16 * scale}px system-ui, sans-serif`;
+    // Display Value
+    let displayValue = value;
+    // Format decimal if needed
+    const valueStr = (Math.abs(value) < 10 && value % 1 !== 0) ? value.toFixed(1) : Math.floor(value).toString();
     
-    // Index
-    ctx.font = '11px system-ui, sans-serif';
-    ctx.fillStyle = colorSubText;
-    ctx.fillText(`#${index}`, cx, cy + 15);
+    ctx.fillText(valueStr, 50 * scale, 75 * scale);
+    
+    // Units
+    ctx.fillStyle = '#A9ABAF';
+    ctx.font = `bold ${8 * scale}px system-ui, sans-serif`;
+    ctx.fillText('PSI', 50 * scale, 85 * scale);
+
+    // Title
+    ctx.fillStyle = '#E8E6E7';
+    ctx.font = `bold ${10 * scale}px system-ui, sans-serif`;
+    ctx.fillText(`#${index}`, 50 * scale, 22 * scale);
+
+    // --- 5. Needle ---
+    const needleAng = getAngle(value, minVal, maxVal);
+    const rTip = 35 * innerScale; 
+    const rBase = -8 * innerScale; // Tail length
+    const baseWidth = 3 * innerScale;
+    
+    // Needle pivot is at tickCenter (50, 63)
+    const nCx = tickCenter.x;
+    const nCy = tickCenter.y;
+
+    // Needle Shape
+    // Calculate perpendicular offset for base width
+    const dx = Math.cos(needleAng);
+    const dy = Math.sin(needleAng);
+    const pdx = -dy * (baseWidth / 2);
+    const pdy = dx * (baseWidth / 2);
+
+    ctx.beginPath();
+    // Tip
+    ctx.moveTo(nCx + dx * rTip, nCy + dy * rTip);
+    // Base Right
+    ctx.lineTo(nCx + dx * rBase + pdx, nCy + dy * rBase + pdy);
+    // Base Left
+    ctx.lineTo(nCx + dx * rBase - pdx, nCy + dy * rBase - pdy);
+    ctx.closePath();
+    
+    ctx.fillStyle = '#E8E6E7'; // White needle
+    ctx.fill();
+
+    // Pivot Cap
+    ctx.beginPath();
+    ctx.arc(nCx, nCy, 6 * innerScale, 0, 2 * Math.PI);
+    ctx.fillStyle = '#0a0a0a'; // Black center
+    ctx.fill();
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1 * innerScale;
+    ctx.stroke();
+
+    ctx.restore();
   }
 
   function render() {
@@ -150,6 +347,7 @@
   // Reactive render when data changes
   $: if (data && ctx) requestRender();
   $: if (itemCount && ctx) requestRender(); // Re-render if count changes
+  $: if (configs && ctx) requestRender(); // Re-render if configs change
 
   onMount(() => {
     const resizeObserver = new ResizeObserver(resize);
@@ -176,7 +374,7 @@
     position: relative;
     width: 100%;
     overflow: hidden;
-    background: white;
+    background: #000;
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }

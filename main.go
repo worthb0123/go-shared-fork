@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
@@ -29,12 +30,26 @@ type Response struct {
 	Error     string          `json:"error,omitempty"`
 }
 
+// RegisterConfig holds the static configuration for a register
+type RegisterConfig struct {
+	DisplayMin float64 `json:"displayMin"`
+	DisplayMax float64 `json:"displayMax"`
+	LowWarn    float64 `json:"lowWarn"`
+	HighWarn   float64 `json:"highWarn"`
+	LowFault   float64 `json:"lowFault"`
+	HighFault  float64 `json:"highFault"`
+	Offset     float64 `json:"offset"`
+	Scale      float64 `json:"scale"`
+	Color      string  `json:"color"`
+}
+
 // Register represents a single register with internal and published values
 type Register struct {
-	Published      int     `json:"published"`
-	Internal       float64 `json:"internal"`
-	IncDec         float64 `json:"incDec"`
-	PrevPublished  int     `json:"prevPublished"`
+	Published      int            `json:"published"`
+	Internal       float64        `json:"internal"`
+	IncDec         float64        `json:"incDec"`
+	PrevPublished  int            `json:"prevPublished"`
+	Config         RegisterConfig `json:"config"`
 }
 
 // Device represents a device with registers
@@ -53,6 +68,12 @@ type RegisterData struct {
 type DeviceData struct {
 	ID        int   `json:"id"`
 	Registers []int `json:"registers"`
+}
+
+// DeviceConfigData holds configuration for all registers of a device
+type DeviceConfigData struct {
+	ID      int              `json:"id"`
+	Configs []RegisterConfig `json:"configs"`
 }
 
 // Subscription represents a client's subscription to a channel
@@ -86,6 +107,8 @@ func init() {
 	
 	// Initialize devices
 	rand.Seed(time.Now().UnixNano())
+	colors := []string{"#ef4444", "#f59e0b", "#f97316", "#10b981", "#3b82f6", "#000000", "#ffffff"} // Red, Yellow, Orange, Green, Blue, Black, White
+
 	for deviceID := 1; deviceID <= 2; deviceID++ {
 		device := &Device{
 			ID:        deviceID,
@@ -104,12 +127,54 @@ func init() {
 					incDec = 0.1
 				}
 			}
+
+			// Generate Config
+			offset := (rand.Float64() * 10) - 5 // -5 to +5
+			scale := (rand.Float64() * 4) + 1   // +1 to +5
+
+			// DisplayMax: (100 * Scale) * 1.25 rounded up to nearest 5
+			rawMax := (100.0 * math.Abs(scale)) * 1.25
+			displayMax := math.Ceil(rawMax/5.0) * 5.0
+
+			// DisplayMin: 0 - Offset * 1.25 rounded down to nearest 5
+			// Wait, logic check: "0 - Offset * 1.25" or "(0 - Offset) * 1.25"?
+			// Assuming "DisplayMin to be 0 - Offset * 1.25" means "0 minus (Offset * 1.25)"
+			// Actually, let's assume it scales similarly to Max but relative to 0.
+			// Or maybe it meant (0 + Offset) * scale?
+			// Let's stick to the prompt literal: 0 - (Offset * 1.25)
+			rawMin := 0.0 - (offset * 1.25)
+			displayMin := math.Floor(rawMin/5.0) * 5.0
+			
+			// Ensure Min < Max
+			if displayMin >= displayMax {
+				displayMax = displayMin + 100
+			}
+
+			// Ranges based on Max
+			// Note: These should probably be relative to the range (Max - Min), but prompt said "of DisplayMax"
+			lowFault := displayMax * 0.05
+			lowWarn := displayMax * 0.10
+			highWarn := displayMax * 0.80
+			highFault := displayMax * 0.90
+			
+			color := colors[rand.Intn(len(colors))]
 			
 			device.Registers[i] = Register{
 				Published:     published,
 				Internal:      float64(published),
 				IncDec:        incDec,
 				PrevPublished: published,
+				Config: RegisterConfig{
+					DisplayMin: displayMin,
+					DisplayMax: displayMax,
+					LowWarn:    lowWarn,
+					HighWarn:   highWarn,
+					LowFault:   lowFault,
+					HighFault:  highFault,
+					Offset:     offset,
+					Scale:      scale,
+					Color:      color,
+				},
 			}
 		}
 		worker.devices[deviceID] = device
@@ -341,6 +406,29 @@ func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, []int, error) {
 	return buf, state, nil
 }
 
+// GetDeviceConfig returns the full configuration for a device
+func (sw *SharedWorker) GetDeviceConfig(deviceID int) ([]byte, error) {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+
+	device, ok := sw.devices[deviceID]
+	if !ok {
+		return nil, fmt.Errorf("device not found")
+	}
+
+	configs := make([]RegisterConfig, len(device.Registers))
+	for i, reg := range device.Registers {
+		configs[i] = reg.Config
+	}
+
+	configData := DeviceConfigData{
+		ID:      deviceID,
+		Configs: configs,
+	}
+
+	return json.Marshal(configData)
+}
+
 // Subscribe adds a client to a channel's subscription list
 func (sw *SharedWorker) Subscribe(clientID string, channel string, port js.Value, fps int) Response {
 	sw.mu.Lock()
@@ -398,6 +486,21 @@ func (sw *SharedWorker) Subscribe(clientID string, channel string, port js.Value
 			} else {
 				initialData = nil
 			}
+
+			// Send Config Snapshot (JSON)
+			configBytes, err := sw.GetDeviceConfig(deviceID)
+			if err == nil {
+				// We send this as a "data" message but logically it's config.
+				// Let's use a "config" type response.
+				// But `sendToPort` takes a Response.
+				resp := Response{
+					Type:    "config",
+					Channel: channel,
+					Data:    json.RawMessage(configBytes),
+				}
+				sw.sendToPort(port, resp)
+			}
+
 		}
 	} else {
 		sw.mu.RLock()

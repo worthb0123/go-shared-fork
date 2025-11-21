@@ -2,17 +2,21 @@
   import { onMount, onDestroy } from 'svelte';
   import { SharedWorkerClient } from '../client.js';
   import CanvasGrid from './CanvasGrid.svelte';
-  import { registers } from './stores/registers.js';
+  import CanvasTable from './CanvasTable.svelte';
+  import { registers, rawRegisters, registerConfigs } from './stores/registers.js';
 
   let client = null;
   let error = '';
   let selectedDevice = 1;
   let unsubscribe = null;
+  let currentView = 'dashboard'; // 'dashboard' | 'debug'
 
   let gridHeight = 800;
-  let itemSize = 160;
+  let itemSize = 200;
   let gap = 16;
   let registerValues = []; // Store register values by number (array index)
+  let rawValues = []; // Store raw values
+  let localConfigs = []; // Local mirror of configs for fast access
   let isScrolling = false;
   // let scrollTimeout = null;
   // let scrollTimeoutMs = 300;
@@ -30,15 +34,16 @@
 
   // Throttled render loop: Updates store only at target FPS
   function renderLoop(currentTime) {
-    // Only update store if we have pending updates
-    // We don't check isScrolling here because CanvasGrid handles its own scrolling efficiently
-    // and updates to the store shouldn't break the scroll interaction on canvas.
-    if (pendingUpdates) {
-       registers.set(registerValues);
-       pendingUpdates = null;
-    }
-    
-    rafId = requestAnimationFrame(renderLoop);
+  // Only update store if we have pending updates
+  // We don't check isScrolling here because CanvasGrid handles its own scrolling efficiently
+  // and updates to the store shouldn't break the scroll interaction on canvas.
+  if (pendingUpdates) {
+     registers.set(registerValues);
+     rawRegisters.set(rawValues);
+     pendingUpdates = null;
+  }
+  
+  rafId = requestAnimationFrame(renderLoop);
   }
 
   // Scroll handling logic removed as it's now handled inside CanvasGrid or not needed due to performance
@@ -60,6 +65,37 @@
 
     unsubscribe = client.subscribe(channel, (data) => {
       try {
+        // Handle Config Update (Object with configs array)
+        if (data && data.configs && Array.isArray(data.configs)) {
+          const isFirstConfig = localConfigs.length === 0;
+          localConfigs = data.configs;
+          registerConfigs.set(data.configs);
+          
+          // Also ensure registerValues is large enough
+          if (registerValues.length < localConfigs.length) {
+             for (let i = registerValues.length; i < localConfigs.length; i++) {
+                 registerValues[i] = 0;
+                 rawValues[i] = 0;
+             }
+          }
+
+          // If this is the first config we've received, the current registerValues 
+          // (populated by the initial snapshot or defaults) are raw/unscaled.
+          // We need to apply the configuration to them.
+          if (isFirstConfig) {
+              for (let i = 0; i < registerValues.length; i++) {
+                  rawValues[i] = registerValues[i]; // Capture what was there as raw
+                  const config = localConfigs[i];
+                  if (config) {
+                      registerValues[i] = registerValues[i] * config.scale + config.offset;
+                  }
+              }
+          }
+          
+          pendingUpdates = true;
+          return;
+        }
+
         // data is Uint8Array
         if (data instanceof Uint8Array) {
           let ptr = 0;
@@ -72,9 +108,21 @@
               
               // Grow array if needed
               if (idx >= registerValues.length) {
-                 for (let i = registerValues.length; i <= idx; i++) registerValues[i] = 0;
+                 for (let i = registerValues.length; i <= idx; i++) {
+                    registerValues[i] = 0;
+                    rawValues[i] = 0;
+                 }
               }
-              registerValues[idx] = val;
+              
+              // Apply config scale/offset
+              rawValues[idx] = val;
+              const config = localConfigs[idx];
+              if (config) {
+                  // Value = RawValue * Scale + Offset
+                  registerValues[idx] = val * config.scale + config.offset;
+              } else {
+                  registerValues[idx] = val;
+              }
               
             } else if (opcode === 2) { // Run
               const startIdx = data[ptr] | (data[ptr+1] << 8);
@@ -83,11 +131,23 @@
               
               // Grow array if needed
               if (startIdx + count > registerValues.length) {
-                 for (let i = registerValues.length; i < startIdx + count; i++) registerValues[i] = 0;
+                 for (let i = registerValues.length; i < startIdx + count; i++) {
+                    registerValues[i] = 0;
+                    rawValues[i] = 0;
+                 }
               }
               
               for (let i = 0; i < count; i++) {
-                registerValues[startIdx + i] = data[ptr++];
+                const rawVal = data[ptr++];
+                const idx = startIdx + i;
+                
+                rawValues[idx] = rawVal;
+                const config = localConfigs[idx];
+                if (config) {
+                    registerValues[idx] = rawVal * config.scale + config.offset;
+                } else {
+                    registerValues[idx] = rawVal;
+                }
               }
             }
           }
@@ -147,6 +207,17 @@
 
       <div class="spacer"></div>
 
+      <div class="view-toggle">
+        <button class:active={currentView === 'dashboard'} on:click={() => currentView = 'dashboard'}>
+          Dashboard
+        </button>
+        <button class:active={currentView === 'debug'} on:click={() => currentView = 'debug'}>
+          Debug
+        </button>
+      </div>
+
+      <div class="spacer"></div>
+
       <label for="fps-select">Target FPS:</label>
       <select id="fps-select" bind:value={targetFPS}>
         <option value={2}>2 FPS</option>
@@ -166,13 +237,23 @@
         class="grid-wrapper" 
         bind:clientHeight={gridHeight}
       >
-        <CanvasGrid
-          itemCount={$registers.length}
-          itemSize={itemSize}
-          gap={gap}
-          height={gridHeight}
-          data={$registers}
-        />
+        {#if currentView === 'dashboard'}
+          <CanvasGrid
+            itemCount={$registers.length}
+            itemSize={itemSize}
+            gap={gap}
+            height={gridHeight}
+            data={$registers}
+            configs={$registerConfigs}
+          />
+        {:else}
+          <CanvasTable
+            height={gridHeight}
+            rawData={$rawRegisters}
+            displayData={$registers}
+            configs={$registerConfigs}
+          />
+        {/if}
       </div>
     {/if}
   {:else}
@@ -184,7 +265,7 @@
   :global(body) {
     margin: 0;
     font-family: system-ui, -apple-system, sans-serif;
-    background-color: #f5f5f5;
+    background-color: #000;
   }
 
   :global(#app) {
@@ -205,12 +286,12 @@
   h1 {
     margin: 0 0 8px 0;
     font-size: 28px;
-    color: #333;
+    color: #eee;
   }
 
   p {
     margin: 0 0 16px 0;
-    color: #666;
+    color: #999;
   }
 
   .controls {
@@ -219,7 +300,7 @@
     gap: 20px;
     margin-bottom: 16px;
     padding: 16px;
-    background: white;
+    background: #1a1a1a;
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     flex-wrap: wrap;
@@ -227,30 +308,24 @@
 
   label {
     font-weight: 600;
-    color: #333;
+    color: #eee;
   }
 
-  select,
-  input[type='number'] {
+  select {
     padding: 8px 12px;
-    border: 1px solid #ccc;
+    border: 1px solid #444;
+    background: #333;
+    color: #eee;
     border-radius: 4px;
     font-size: 16px;
     cursor: pointer;
   }
 
-  input[type='number'] {
-    cursor: text;
-    width: 100px;
-  }
-
-  select:hover,
-  input[type='number']:hover {
+  select:hover {
     border-color: #999;
   }
 
-  select:focus,
-  input[type='number']:focus {
+  select:focus {
     outline: none;
     border-color: #0066cc;
     box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.1);
@@ -258,6 +333,34 @@
 
   .spacer {
     flex: 1;
+  }
+
+  .view-toggle {
+    display: flex;
+    gap: 1px;
+    background: #444;
+    border-radius: 4px;
+    padding: 2px;
+  }
+
+  .view-toggle button {
+    background: transparent;
+    border: none;
+    color: #999;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    border-radius: 2px;
+    transition: all 0.2s;
+  }
+
+  .view-toggle button.active {
+    background: #666;
+    color: #fff;
+  }
+
+  .view-toggle button:hover:not(.active) {
+    color: #eee;
   }
 
   .error-banner {
@@ -277,18 +380,12 @@
   }
 
   .grid-wrapper {
-    background: white;
+    background: #000;
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     overflow: hidden;
     flex: 1;
     min-height: 0;
-  }
-
-  .gauge-wrapper {
-    display: flex;
-    justify-content: center;
-    align-items: center;
   }
 
   @media (max-width: 768px) {
