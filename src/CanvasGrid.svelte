@@ -7,6 +7,7 @@
   export let height = 800;
   export let data = []; // Array of values
   export let configs = []; // Array of config objects
+  export let scrollOptimization = true;
   
   let canvas;
   let ctx;
@@ -40,6 +41,9 @@
 
   function handleWheel(e) {
     // Turbo Scroll: Detect rapid wheel movement and exaggerate scrolling
+    // Only enabled when optimizations are on
+    if (!scrollOptimization) return;
+
     const now = performance.now();
     const dt = now - lastWheelTime;
     lastWheelTime = now;
@@ -338,58 +342,71 @@
     const absDiff = Math.abs(diff);
     let animating = false;
     
-    // If very close, snap to finish
-    if (absDiff < 1.0) {
-        renderScrollTop = targetScrollTop;
-    } else {
-        animating = true;
-        
-        // Anti-Aliasing / Wagon Wheel Effect Correction
-        const period = itemSize + gap;
+    if (scrollOptimization) {
+        // --- Optimized Physics ---
+        // If very close, snap to finish
+        if (absDiff < 1.0) {
+            renderScrollTop = targetScrollTop;
+        } else {
+            animating = true;
+            
+            // Anti-Aliasing / Wagon Wheel Effect Correction
+            const period = itemSize + gap;
 
-        // 1. Large Discrepancy Teleport (Catch-up)
-        // Reduced threshold significantly (2500 -> 600) to keep the view tight to the scrollbar.
-        // This prevents the "waiting for 10 rows" feeling.
-        const catchUpThreshold = 600; 
-        if (absDiff > catchUpThreshold) {
-            renderScrollTop = targetScrollTop - (Math.sign(diff) * catchUpThreshold);
-            diff = targetScrollTop - renderScrollTop; // Recalculate diff
-        }
-        
-        // 2. Base Lerp (Coasting Speed)
-        // Increased to 0.35 for very snappy settling
-        let step = diff * 0.35;
-        
-        // 3. Minimum Velocity Floor (Linear Finish)
-        // Increased floor to ~20% of row height.
-        // This ensures we hit the target with momentum and stop abruptly.
-        const minVelocity = period * 0.2; 
-        if (Math.abs(step) < minVelocity) {
-            step = Math.sign(diff) * minVelocity;
-            // Prevent overshoot if we are closer than minVelocity
-            if (Math.abs(step) > Math.abs(diff)) {
-                step = diff;
+            // 1. Large Discrepancy Teleport (Catch-up)
+            // Reduced threshold significantly (2500 -> 600) to keep the view tight to the scrollbar.
+            // This prevents the "waiting for 10 rows" feeling.
+            const catchUpThreshold = 600; 
+            if (absDiff > catchUpThreshold) {
+                renderScrollTop = targetScrollTop - (Math.sign(diff) * catchUpThreshold);
+                diff = targetScrollTop - renderScrollTop; // Recalculate diff
             }
-        }
-        
-        // Only apply correction if we are moving fast enough for aliasing to matter (> 1/2 period)
-        if (Math.abs(step) > period * 0.5) {
-            const turns = step / period;
-            const nearestTurn = Math.round(turns);
-            const remainder = step - (nearestTurn * period);
             
-            // Check if we are in the "Forbidden Zone" (Aliasing or Stroboscopic Freeze)
-            const isAliasing = Math.sign(remainder) !== Math.sign(step);
-            const isFreezing = Math.abs(remainder) < period * 0.15; // 15% buffer
+            // 2. Base Lerp (Coasting Speed)
+            // Increased to 0.35 for very snappy settling
+            let step = diff * 0.35;
             
-            if (isAliasing || isFreezing) {
-                // Boost speed to the next "Safe Zone" (e.g. 1.2x Period)
-                const safeBuffer = period * 0.25; 
-                step = (nearestTurn * period) + (Math.sign(step) * safeBuffer);
+            // 3. Minimum Velocity Floor (Linear Finish)
+            // Increased floor to ~20% of row height.
+            // This ensures we hit the target with momentum and stop abruptly.
+            const minVelocity = period * 0.2; 
+            if (Math.abs(step) < minVelocity) {
+                step = Math.sign(diff) * minVelocity;
+                // Prevent overshoot if we are closer than minVelocity
+                if (Math.abs(step) > Math.abs(diff)) {
+                    step = diff;
+                }
             }
+            
+            // Only apply correction if we are moving fast enough for aliasing to matter (> 1/2 period)
+            if (Math.abs(step) > period * 0.5) {
+                const turns = step / period;
+                const nearestTurn = Math.round(turns);
+                const remainder = step - (nearestTurn * period);
+                
+                // Check if we are in the "Forbidden Zone" (Aliasing or Stroboscopic Freeze)
+                const isAliasing = Math.sign(remainder) !== Math.sign(step);
+                const isFreezing = Math.abs(remainder) < period * 0.15; // 15% buffer
+                
+                if (isAliasing || isFreezing) {
+                    // Boost speed to the next "Safe Zone" (e.g. 1.2x Period)
+                    const safeBuffer = period * 0.25; 
+                    step = (nearestTurn * period) + (Math.sign(step) * safeBuffer);
+                }
+            }
+        
+            renderScrollTop += step;
         }
-    
-        renderScrollTop += step;
+    } else {
+        // --- Unoptimized Physics (Standard Lerp) ---
+        // This allows reproducing the "Wagon Wheel" effect
+        if (absDiff < 0.5) {
+            renderScrollTop = targetScrollTop;
+        } else {
+            animating = true;
+            // Use the slower lerp (0.15) that caused the issue originally
+            renderScrollTop += diff * 0.15;
+        }
     }
 
     // Clear

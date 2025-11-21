@@ -18,6 +18,7 @@
   let rawValues = []; // Store raw values
   let localConfigs = []; // Local mirror of configs for fast access
   let isScrolling = false;
+  let scrollOptimization = true;
   // let scrollTimeout = null;
   // let scrollTimeoutMs = 300;
   // let lastScrollPosition = 0;
@@ -191,6 +192,13 @@
 
       <div class="spacer"></div>
 
+      <label class="checkbox-label">
+        <input type="checkbox" checked={scrollOptimization} on:change={(e) => scrollOptimization = e.currentTarget.checked}>
+        Scroll Optimization
+      </label>
+
+      <div class="spacer"></div>
+
       <div class="view-toggle">
         <button class:active={currentView === 'dashboard'} on:click={() => currentView = 'dashboard'}>
           Dashboard
@@ -229,6 +237,7 @@
             height={gridHeight}
             data={$registers}
             configs={$registerConfigs}
+            scrollOptimization={scrollOptimization}
           />
         {:else}
           <CanvasTable
@@ -236,6 +245,7 @@
             rawData={$rawRegisters}
             displayData={$registers}
             configs={$registerConfigs}
+            scrollOptimization={scrollOptimization}
           />
         {/if}
       </div>
@@ -345,6 +355,20 @@
 
   .view-toggle button:hover:not(.active) {
     color: #eee;
+  }
+
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .checkbox-label input {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
   }
 
   .error-banner {

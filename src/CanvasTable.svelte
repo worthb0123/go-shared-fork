@@ -5,6 +5,7 @@
   export let rawData = [];
   export let displayData = [];
   export let configs = [];
+  export let scrollOptimization = true;
   
   let canvas;
   let ctx;
@@ -42,6 +43,8 @@
   ];
 
   function handleWheel(e) {
+    if (!scrollOptimization) return;
+
     const now = performance.now();
     const dt = now - lastWheelTime;
     lastWheelTime = now;
@@ -93,49 +96,60 @@
     const absDiff = Math.abs(diff);
     let animating = false;
 
-    if (absDiff < 1.0) {
-        renderScrollTop = targetScrollTop;
+    if (scrollOptimization) {
+        // --- Optimized Physics ---
+        if (absDiff < 1.0) {
+            renderScrollTop = targetScrollTop;
+        } else {
+            animating = true;
+
+            // 1. Teleport / Catch-up
+            // Tightened to ~200px (approx 6-7 rows)
+            const catchUpThreshold = 200; 
+            if (absDiff > catchUpThreshold) {
+                renderScrollTop = targetScrollTop - (Math.sign(diff) * catchUpThreshold);
+                diff = targetScrollTop - renderScrollTop;
+            }
+
+            // 2. Faster Coasting
+            let step = diff * 0.35;
+            
+            // Anti-Aliasing Correction
+            const period = rowHeight;
+
+            // 3. Minimum Velocity Floor
+            const minVelocity = period * 0.3; // 30% of row height
+            if (Math.abs(step) < minVelocity) {
+                step = Math.sign(diff) * minVelocity;
+                if (Math.abs(step) > Math.abs(diff)) {
+                    step = diff;
+                }
+            }
+            
+            if (Math.abs(step) > period * 0.5) {
+                const turns = step / period;
+                const nearestTurn = Math.round(turns);
+                const remainder = step - (nearestTurn * period);
+                
+                const isAliasing = Math.sign(remainder) !== Math.sign(step);
+                const isFreezing = Math.abs(remainder) < period * 0.15;
+                
+                if (isAliasing || isFreezing) {
+                    const safeBuffer = period * 0.25;
+                    step = (nearestTurn * period) + (Math.sign(step) * safeBuffer);
+                }
+            }
+            
+            renderScrollTop += step;
+        }
     } else {
-        animating = true;
-
-        // 1. Teleport / Catch-up
-        // Tightened to ~200px (approx 6-7 rows)
-        const catchUpThreshold = 200; 
-        if (absDiff > catchUpThreshold) {
-            renderScrollTop = targetScrollTop - (Math.sign(diff) * catchUpThreshold);
-            diff = targetScrollTop - renderScrollTop;
+        // --- Unoptimized Physics (Standard Lerp) ---
+        if (absDiff < 0.5) {
+            renderScrollTop = targetScrollTop;
+        } else {
+            animating = true;
+            renderScrollTop += diff * 0.15;
         }
-
-        // 2. Faster Coasting
-        let step = diff * 0.35;
-        
-        // Anti-Aliasing Correction
-        const period = rowHeight;
-
-        // 3. Minimum Velocity Floor
-        const minVelocity = period * 0.3; // 30% of row height
-        if (Math.abs(step) < minVelocity) {
-            step = Math.sign(diff) * minVelocity;
-            if (Math.abs(step) > Math.abs(diff)) {
-                step = diff;
-            }
-        }
-        
-        if (Math.abs(step) > period * 0.5) {
-            const turns = step / period;
-            const nearestTurn = Math.round(turns);
-            const remainder = step - (nearestTurn * period);
-            
-            const isAliasing = Math.sign(remainder) !== Math.sign(step);
-            const isFreezing = Math.abs(remainder) < period * 0.15;
-            
-            if (isAliasing || isFreezing) {
-                const safeBuffer = period * 0.25;
-                step = (nearestTurn * period) + (Math.sign(step) * safeBuffer);
-            }
-        }
-        
-        renderScrollTop += step;
     }
 
     // Fill Background
