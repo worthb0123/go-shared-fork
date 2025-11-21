@@ -11,9 +11,15 @@
   let canvas;
   let ctx;
   let width = 0;
-  let scrollTop = 0;
+  let targetScrollTop = 0;
+  let renderScrollTop = 0;
   let rafId;
+  let scroller;
   
+  // Turbo Scroll State
+  let wheelMomentum = 0;
+  let lastWheelTime = 0;
+
   // Calculated layout
   $: cols = Math.floor((width + gap) / (itemSize + gap));
   $: rows = Math.ceil(itemCount / cols);
@@ -28,12 +34,45 @@
   const colorSubText = '#6b7280';
 
   function handleScroll(e) {
-    scrollTop = e.target.scrollTop;
+    targetScrollTop = e.target.scrollTop;
     requestRender();
   }
 
   function handleWheel(e) {
-    // Forward wheel events to scroll container if needed
+    // Turbo Scroll: Detect rapid wheel movement and exaggerate scrolling
+    const now = performance.now();
+    const dt = now - lastWheelTime;
+    lastWheelTime = now;
+
+    // Decay momentum: If user pauses or slows down (>50ms between ticks), reset
+    if (dt > 50) {
+        wheelMomentum = 0;
+    }
+
+    // Accumulate momentum (Simple Moving Average-ish)
+    // We decay existing momentum slightly and add new impulse
+    wheelMomentum = (wheelMomentum * 0.9) + Math.abs(e.deltaY);
+
+    // Threshold for engaging "Turbo Mode"
+    // Typical scroll click is ~100px. Fast spinning generates high frequency events.
+    // A steady accumulation > 500 indicates intentional rapid scrolling.
+    const threshold = 500;
+    
+    if (wheelMomentum > threshold) {
+        // Calculate multiplier based on excess momentum
+        // Scale down the excess to a reasonable multiplier (e.g. 0.02)
+        const excess = wheelMomentum - threshold;
+        const multiplier = excess * 0.02;
+        
+        // Safety Cap: Don't let it go infinitely crazy (max 50x speed)
+        const safeMultiplier = Math.min(multiplier, 50);
+
+        if (safeMultiplier > 1 && scroller) {
+             // Apply boost directly to scroll position
+             // Note: This adds to the browser's native scroll (we don't preventDefault)
+             scroller.scrollTop += e.deltaY * safeMultiplier;
+        }
+    }
   }
 
   function resize() {
@@ -294,13 +333,72 @@
   function render() {
     if (!ctx || !width) return;
     
+    // Smooth Scroll Interpolation
+    let diff = targetScrollTop - renderScrollTop;
+    const absDiff = Math.abs(diff);
+    let animating = false;
+    
+    // If very close, snap to finish
+    if (absDiff < 1.0) {
+        renderScrollTop = targetScrollTop;
+    } else {
+        animating = true;
+        
+        // Anti-Aliasing / Wagon Wheel Effect Correction
+        const period = itemSize + gap;
+
+        // 1. Large Discrepancy Teleport (Catch-up)
+        // Reduced threshold significantly (2500 -> 600) to keep the view tight to the scrollbar.
+        // This prevents the "waiting for 10 rows" feeling.
+        const catchUpThreshold = 600; 
+        if (absDiff > catchUpThreshold) {
+            renderScrollTop = targetScrollTop - (Math.sign(diff) * catchUpThreshold);
+            diff = targetScrollTop - renderScrollTop; // Recalculate diff
+        }
+        
+        // 2. Base Lerp (Coasting Speed)
+        // Increased to 0.35 for very snappy settling
+        let step = diff * 0.35;
+        
+        // 3. Minimum Velocity Floor (Linear Finish)
+        // Increased floor to ~20% of row height.
+        // This ensures we hit the target with momentum and stop abruptly.
+        const minVelocity = period * 0.2; 
+        if (Math.abs(step) < minVelocity) {
+            step = Math.sign(diff) * minVelocity;
+            // Prevent overshoot if we are closer than minVelocity
+            if (Math.abs(step) > Math.abs(diff)) {
+                step = diff;
+            }
+        }
+        
+        // Only apply correction if we are moving fast enough for aliasing to matter (> 1/2 period)
+        if (Math.abs(step) > period * 0.5) {
+            const turns = step / period;
+            const nearestTurn = Math.round(turns);
+            const remainder = step - (nearestTurn * period);
+            
+            // Check if we are in the "Forbidden Zone" (Aliasing or Stroboscopic Freeze)
+            const isAliasing = Math.sign(remainder) !== Math.sign(step);
+            const isFreezing = Math.abs(remainder) < period * 0.15; // 15% buffer
+            
+            if (isAliasing || isFreezing) {
+                // Boost speed to the next "Safe Zone" (e.g. 1.2x Period)
+                const safeBuffer = period * 0.25; 
+                step = (nearestTurn * period) + (Math.sign(step) * safeBuffer);
+            }
+        }
+    
+        renderScrollTop += step;
+    }
+
     // Clear
     ctx.clearRect(0, 0, width, height);
     
     if (cols < 1) return;
 
-    // Determine visible range
-    const startRow = Math.floor(scrollTop / (itemSize + gap));
+    // Determine visible range using renderScrollTop
+    const startRow = Math.floor(renderScrollTop / (itemSize + gap));
     const visibleRows = Math.ceil(height / (itemSize + gap)) + 1;
     const endRow = Math.min(rows, startRow + visibleRows);
     
@@ -314,7 +412,7 @@
       
       // Calculate local position relative to scroll
       // We draw relative to the canvas (0,0 is top-left of viewport)
-      // Item Y is: (row * (size + gap)) - scrollTop
+      // Item Y is: (row * (size + gap)) - renderScrollTop
       
       const x = col * (itemSize + gap) + gap/2; // Center horizontally roughly? or just gap
       // Better centering:
@@ -322,12 +420,16 @@
       const marginX = (width - totalRowWidth) / 2;
       const drawX = marginX + col * (itemSize + gap);
       
-      const y = row * (itemSize + gap) - scrollTop;
+      const y = row * (itemSize + gap) - renderScrollTop;
       
       // Optimization: Skip drawing if strictly outside bounds (though loop mostly handles this)
       if (y > height || y + itemSize < 0) continue;
 
       drawGauge(ctx, drawX, y, itemSize, data[i] ?? 0, i);
+    }
+
+    if (animating) {
+        requestRender(); // Keep animating until settled
     }
   }
 
@@ -363,7 +465,13 @@
 
 <div class="canvas-container" style="height: {height}px;">
   <!-- We need a scrollable element to capture scroll events and creating the 'height' -->
-  <div class="scroller" on:scroll={handleScroll} style="height: 100%;">
+  <div 
+    class="scroller" 
+    bind:this={scroller}
+    on:scroll={handleScroll} 
+    on:wheel={handleWheel}
+    style="height: 100%;"
+  >
     <div class="phantom-height" style="height: {totalHeight}px;"></div>
   </div>
   <canvas bind:this={canvas}></canvas>

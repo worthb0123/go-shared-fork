@@ -29,21 +29,10 @@
   let frameInterval = 1000 / targetFPS;
   $: frameInterval = 1000 / targetFPS;
   let lastRenderTime = 0;
-  let pendingUpdates = null;
-  let rafId = null;
 
-  // Throttled render loop: Updates store only at target FPS
-  function renderLoop(currentTime) {
-  // Only update store if we have pending updates
-  // We don't check isScrolling here because CanvasGrid handles its own scrolling efficiently
-  // and updates to the store shouldn't break the scroll interaction on canvas.
-  if (pendingUpdates) {
-     registers.set(registerValues);
-     rawRegisters.set(rawValues);
-     pendingUpdates = null;
-  }
-  
-  rafId = requestAnimationFrame(renderLoop);
+  function updateStores() {
+       registers.set(registerValues);
+       rawRegisters.set(rawValues);
   }
 
   // Scroll handling logic removed as it's now handled inside CanvasGrid or not needed due to performance
@@ -92,7 +81,7 @@
               }
           }
           
-          pendingUpdates = true;
+          updateStores();
           return;
         }
 
@@ -152,8 +141,8 @@
             }
           }
           
-          // Trigger Svelte update via renderLoop
-          pendingUpdates = true;
+          // Trigger Svelte update
+          updateStores();
         } 
       } catch (e) {
         console.error('Error processing device data:', e);
@@ -164,8 +153,6 @@
   onMount(async () => {
     try {
       client = new SharedWorkerClient('./worker.js');
-      // Start render loop
-      rafId = requestAnimationFrame(renderLoop);
       // Initial subscribe
       subscribeToDevice(selectedDevice);
     } catch (e) {
@@ -176,9 +163,6 @@
   onDestroy(() => {
     if (unsubscribe) {
       unsubscribe();
-    }
-    if (rafId) {
-      cancelAnimationFrame(rafId);
     }
   });
 
