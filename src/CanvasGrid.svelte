@@ -398,7 +398,7 @@
     if (cols < 1) return;
 
     // Determine visible range using renderScrollTop
-    const startRow = Math.floor(renderScrollTop / (itemSize + gap));
+    const startRow = Math.max(0, Math.floor(renderScrollTop / (itemSize + gap)));
     const visibleRows = Math.ceil(height / (itemSize + gap)) + 1;
     const endRow = Math.min(rows, startRow + visibleRows);
     
@@ -440,8 +440,12 @@
     // render();
     if (!rafId) {
         rafId = requestAnimationFrame(() => {
-            render();
             rafId = null;
+            try {
+                render();
+            } catch (e) {
+                console.error('Render error:', e);
+            }
         });
     }
   }
@@ -469,7 +473,7 @@
     class="scroller" 
     bind:this={scroller}
     on:scroll={handleScroll} 
-    on:wheel={handleWheel}
+    on:wheel|passive={handleWheel}
     style="height: 100%;"
   >
     <div class="phantom-height" style="height: {totalHeight}px;"></div>

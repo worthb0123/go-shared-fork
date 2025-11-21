@@ -142,7 +142,7 @@
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, width, height);
 
-    const startRow = Math.floor(renderScrollTop / rowHeight);
+    const startRow = Math.max(0, Math.floor(renderScrollTop / rowHeight));
     const visibleRows = Math.ceil(height / rowHeight) + 1;
     const endRow = Math.min(itemCount, startRow + visibleRows);
 
@@ -201,8 +201,12 @@
   function requestRender() {
     if (!rafId) {
         rafId = requestAnimationFrame(() => {
-            render();
             rafId = null;
+            try {
+                render();
+            } catch (e) {
+                console.error('Render error:', e);
+            }
         });
     }
   }
@@ -238,7 +242,7 @@
       class="scroller" 
       bind:this={scroller}
       on:scroll={handleScroll}
-      on:wheel={handleWheel}
+      on:wheel|passive={handleWheel}
     >
         <div class="phantom-height" style="height: {totalHeight}px;"></div>
     </div>
