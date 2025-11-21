@@ -61,6 +61,7 @@ type Subscription struct {
 	Port           js.Value
 	TargetInterval time.Duration
 	LastSent       time.Time
+	LastKnownState []int
 }
 
 // SharedWorker manages subscriptions and broadcasts data to subscribed clients
@@ -209,61 +210,135 @@ func (sw *SharedWorker) Broadcast() {
 			continue
 		}
 
-		// Pre-calculate snapshot for this device to avoid repeated allocation
-		// We only marshal if at least one subscriber needs it
-		var cachedSnapshot []byte
+		// Current state for diffing
+		currentState := make([]int, len(device.Registers))
+		for i := range device.Registers {
+			currentState[i] = device.Registers[i].Published
+		}
 
 		for i := range subs {
 			sub := &subs[i] // Pointer to update LastSent
 			if now.Sub(sub.LastSent) >= sub.TargetInterval {
 				
-				// Generate snapshot if not already done
-				if cachedSnapshot == nil {
-					allRegisters := make([]int, len(device.Registers))
-					for r := range device.Registers {
-						allRegisters[r] = device.Registers[r].Published
-					}
-					deviceData := DeviceData{
-						ID:        deviceID,
-						Registers: allRegisters,
-					}
-					cachedSnapshot, _ = json.Marshal(deviceData)
+				// Initialize LastKnownState if nil (should happen on Subscribe, but just in case)
+				if sub.LastKnownState == nil {
+					sub.LastKnownState = make([]int, len(currentState))
+					// Assume client has nothing (all zeros)
 				}
 
-				// Send
-				response := Response{
-					Type:    "data",
-					Channel: channel,
-					Data:    cachedSnapshot,
+				// Generate delta
+				deltaBuf := EncodeDelta(currentState, sub.LastKnownState)
+
+				if len(deltaBuf) > 0 {
+					// HACK: We can't easily mix JSON control messages and Raw Binary messages on the same port 
+					// unless we handle it on client.
+					// Let's just send the raw Uint8Array. Client check `typeof data`.
+					// Convert Go []byte to JS Uint8Array
+					
+					uint8Array := js.Global().Get("Uint8Array").New(len(deltaBuf))
+					js.CopyBytesToJS(uint8Array, deltaBuf)
+					sub.Port.Call("postMessage", uint8Array)
+
+					// Update LastKnownState
+					copy(sub.LastKnownState, currentState)
 				}
-				sw.sendToPort(sub.Port, response)
+				
 				sub.LastSent = now
 			}
 		}
 	}
 }
 
-// GetDeviceSnapshot returns a full snapshot of a device's registers
-func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, error) {
+// EncodeDelta generates a binary delta buffer
+func EncodeDelta(current, prev []int) []byte {
+	var buf []byte
+	
+	i := 0
+	for i < len(current) {
+		// Skip unchanged
+		if i < len(prev) && current[i] == prev[i] {
+			i++
+			continue
+		}
+
+		// Found a change at i
+		// Determine if it's a run or isolated
+		runStart := i
+		runLen := 0
+		
+		// Look ahead for continuous changes (run)
+		// A "run" is a sequence of changed values.
+		// But wait, the protocol supports "Run of sequential registers".
+		// We can send *any* sequence of registers as a run, even if some didn't change?
+		// No, that wastes bandwidth.
+		// We should only encode *changed* values.
+		// If we have changed, changed, changed -> Run.
+		// If we have changed, unchanged, changed -> Pair, Pair (or Run if unchanged is short?)
+		
+		// Simple greedy approach:
+		// Find consecutive changes.
+		for i < len(current) && runLen < 255 {
+			if i < len(prev) && current[i] == prev[i] {
+				break
+			}
+			runLen++
+			i++
+		}
+
+		// If runLen >= 2, encode as Run (0x02)
+		// If runLen == 1, encode as Pair (0x01)
+		if runLen >= 2 {
+			// Opcode 0x02: [2] [IdxLo] [IdxHi] [Count] [Val...]
+			buf = append(buf, 2)
+			buf = append(buf, byte(runStart&0xFF), byte(runStart>>8))
+			buf = append(buf, byte(runLen))
+			for k := 0; k < runLen; k++ {
+				buf = append(buf, byte(current[runStart+k]))
+			}
+		} else if runLen == 1 {
+			// Opcode 0x01: [1] [IdxLo] [IdxHi] [Val]
+			buf = append(buf, 1)
+			buf = append(buf, byte(runStart&0xFF), byte(runStart>>8))
+			buf = append(buf, byte(current[runStart]))
+		}
+	}
+	return buf
+}
+
+// GetDeviceSnapshot returns a full snapshot as a binary Run
+func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, []int, error) {
 	sw.mu.RLock()
 	defer sw.mu.RUnlock()
 
 	device, ok := sw.devices[deviceID]
 	if !ok {
-		return nil, fmt.Errorf("device not found")
+		return nil, nil, fmt.Errorf("device not found")
 	}
 
-	allRegisters := make([]int, len(device.Registers))
+	state := make([]int, len(device.Registers))
 	for i, reg := range device.Registers {
-		allRegisters[i] = reg.Published
+		state[i] = reg.Published
 	}
 
-	deviceData := DeviceData{
-		ID:        deviceID,
-		Registers: allRegisters,
+	// Create binary snapshot (One giant run)
+	// Since count is byte (max 255), we need multiple runs
+	var buf []byte
+	for i := 0; i < len(state); i += 255 {
+		count := 255
+		if i+count > len(state) {
+			count = len(state) - i
+		}
+		
+		// Opcode 0x02 (Run)
+		buf = append(buf, 2)
+		buf = append(buf, byte(i&0xFF), byte(i>>8))
+		buf = append(buf, byte(count))
+		for k := 0; k < count; k++ {
+			buf = append(buf, byte(state[i+k]))
+		}
 	}
 
-	return json.Marshal(deviceData)
+	return buf, state, nil
 }
 
 // Subscribe adds a client to a channel's subscription list
@@ -296,9 +371,31 @@ func (sw *SharedWorker) Subscribe(clientID string, channel string, port js.Value
 	if strings.HasPrefix(channel, "device_") {
 		var deviceID int
 		if _, scanErr := fmt.Sscanf(channel, "device_%d", &deviceID); scanErr == nil {
-			initialData, err = sw.GetDeviceSnapshot(deviceID)
-			if err != nil {
-				// Log error or ignore? For now, if device not found, we send nothing
+			var snapshotBuf []byte
+			var state []int
+			snapshotBuf, state, err = sw.GetDeviceSnapshot(deviceID)
+			
+			if err == nil {
+				// Update subscription with state
+				// Re-acquire lock to find subscription and update it
+				// Note: This is inefficient (O(N) scan), but Subscribe is rare.
+				sw.mu.Lock()
+				for i := range sw.subscriptions[channel] {
+					if sw.subscriptions[channel][i].ClientID == clientID {
+						sw.subscriptions[channel][i].LastKnownState = state
+						break
+					}
+				}
+				sw.mu.Unlock()
+
+				// Send binary snapshot
+				uint8Array := js.Global().Get("Uint8Array").New(len(snapshotBuf))
+				js.CopyBytesToJS(uint8Array, snapshotBuf)
+				port.Call("postMessage", uint8Array)
+				
+				// We sent the data, so no need to send JSON response with Data
+				initialData = nil
+			} else {
 				initialData = nil
 			}
 		}

@@ -1,8 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { SharedWorkerClient } from '../client.js';
-  import RadialGauge from './RadialGauge.svelte';
-  import { Grid } from 'svelte-virtual';
+  import CanvasGrid from './CanvasGrid.svelte';
   import { registers } from './stores/registers.js';
 
   let client = null;
@@ -15,12 +14,11 @@
   let gap = 16;
   let registerValues = []; // Store register values by number (array index)
   let isScrolling = false;
-  let scrollTimeout = null;
-  let scrollTimeoutMs = 300;
-  // let gridContainerElement = null; // Removed
-  let lastScrollPosition = 0;
-  let scrollCheckInterval = null;
-  let isPointerDown = false;
+  // let scrollTimeout = null;
+  // let scrollTimeoutMs = 300;
+  // let lastScrollPosition = 0;
+  // let scrollCheckInterval = null;
+  // let isPointerDown = false;
 
   // Configurable target FPS
   let targetFPS = 60;
@@ -32,49 +30,18 @@
 
   // Throttled render loop: Updates store only at target FPS
   function renderLoop(currentTime) {
-    if (!isScrolling && currentTime - lastRenderTime >= frameInterval && pendingUpdates) {
-      // Update register values from flat array
-      // Since pendingUpdates is now just [val0, val1, ...], and we want to
-      // update our local state, we can just replace the array or copy values.
-      // Replacing is faster and safe since we are just displaying values.
-      registerValues = pendingUpdates;
-      
-      // Update the store
-      registers.set(registerValues);
-      pendingUpdates = null;
-      lastRenderTime = currentTime;
+    // Only update store if we have pending updates
+    // We don't check isScrolling here because CanvasGrid handles its own scrolling efficiently
+    // and updates to the store shouldn't break the scroll interaction on canvas.
+    if (pendingUpdates) {
+       registers.set(registerValues);
+       pendingUpdates = null;
     }
+    
     rafId = requestAnimationFrame(renderLoop);
   }
 
-  function handleScroll() {
-    isScrolling = true;
-    // Clear existing timeout if user is still scrolling
-    if (scrollTimeout) clearTimeout(scrollTimeout);
-    // Set timeout to detect when scrolling has stopped
-    scrollTimeout = setTimeout(() => {
-      // Only resume updates if pointer is not down (scrollbar is released)
-      if (!isPointerDown) {
-        isScrolling = false;
-      }
-      scrollTimeout = null;
-    }, scrollTimeoutMs);
-  }
-
-  function handlePointerDown() {
-    isPointerDown = true;
-    handleScroll(); // Pause updates immediately when pointer down
-  }
-
-  function handlePointerUp() {
-    isPointerDown = false;
-    // If no scroll timeout is active, it means we either weren't scrolling 
-    // or the timeout expired while the pointer was down. 
-    // In either case, we should ensure updates are resumed.
-    if (!scrollTimeout) {
-      isScrolling = false;
-    }
-  }
+  // Scroll handling logic removed as it's now handled inside CanvasGrid or not needed due to performance
 
   function handleDeviceChange(event) {
     selectedDevice = parseInt(event.target.value);
@@ -93,9 +60,41 @@
 
     unsubscribe = client.subscribe(channel, (data) => {
       try {
-        // Data is already parsed by client.js
-        // data.registers is now a flat array of integers
-        pendingUpdates = data.registers;
+        // data is Uint8Array
+        if (data instanceof Uint8Array) {
+          let ptr = 0;
+          while (ptr < data.length) {
+            const opcode = data[ptr++];
+            if (opcode === 1) { // Pair
+              const idx = data[ptr] | (data[ptr+1] << 8);
+              const val = data[ptr+2];
+              ptr += 3;
+              
+              // Grow array if needed
+              if (idx >= registerValues.length) {
+                 for (let i = registerValues.length; i <= idx; i++) registerValues[i] = 0;
+              }
+              registerValues[idx] = val;
+              
+            } else if (opcode === 2) { // Run
+              const startIdx = data[ptr] | (data[ptr+1] << 8);
+              const count = data[ptr+2];
+              ptr += 3;
+              
+              // Grow array if needed
+              if (startIdx + count > registerValues.length) {
+                 for (let i = registerValues.length; i < startIdx + count; i++) registerValues[i] = 0;
+              }
+              
+              for (let i = 0; i < count; i++) {
+                registerValues[startIdx + i] = data[ptr++];
+              }
+            }
+          }
+          
+          // Trigger Svelte update via renderLoop
+          pendingUpdates = true;
+        } 
       } catch (e) {
         console.error('Error processing device data:', e);
       }
@@ -121,9 +120,6 @@
     if (rafId) {
       cancelAnimationFrame(rafId);
     }
-    if (scrollTimeout) {
-      clearTimeout(scrollTimeout);
-    }
   });
 
   $: if (client && selectedDevice && targetFPS) {
@@ -131,12 +127,10 @@
   }
 </script>
 
-<svelte:window on:pointerup={handlePointerUp} />
-
 <main>
   <h1>Device Register Monitor</h1>
   <p style="font-size:0.9em; color:#666;">
-    Live Data • Throttled @ {targetFPS} FPS • Virtual Scrolling
+    Live Data • Throttled @ {targetFPS} FPS • Canvas Rendering
   </p>
 
   {#if error}
@@ -158,20 +152,11 @@
         <option value={2}>2 FPS</option>
         <option value={4}>4 FPS</option>
         <option value={10}>10 FPS</option>
+        <!-- Higher FPS removed as per 10Hz cap, but keeping in UI if user wants to request it -->
         <option value={15}>15 FPS</option>
         <option value={30}>30 FPS</option>
         <option value={60}>60 FPS</option>
       </select>
-
-      <label for="scroll-timeout-input">Scroll Pause (ms):</label>
-      <input
-        id="scroll-timeout-input"
-        type="number"
-        bind:value={scrollTimeoutMs}
-        min="0"
-        max="5000"
-        step="100"
-      />
     </div>
 
     {#if $registers.length === 0}
@@ -180,26 +165,14 @@
       <div 
         class="grid-wrapper" 
         bind:clientHeight={gridHeight}
-        on:wheel={handleScroll}
-        on:scroll|capture={handleScroll}
-        on:pointerdown={handlePointerDown}
       >
-        <Grid
+        <CanvasGrid
           itemCount={$registers.length}
-          itemHeight={itemSize + gap}
-          itemWidth={itemSize + gap}
+          itemSize={itemSize}
+          gap={gap}
           height={gridHeight}
-          overscan={2}
-        >
-          {#snippet item({ index, style })}
-            <div class="gauge-wrapper" {style}>
-              <RadialGauge
-                registerNumber={index}
-                value={$registers[index] ?? 0}
-              />
-            </div>
-          {/snippet}
-        </Grid>
+          data={$registers}
+        />
       </div>
     {/if}
   {:else}
