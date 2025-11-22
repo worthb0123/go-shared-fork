@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { SharedWorkerClient } from '../client.js';
-import CanvasGrid from './components/CanvasGrid.jsx';
+import GaugeGrid from './components/GaugeGrid.jsx';
 import CanvasTable from './components/CanvasTable.jsx';
 import SerialView from './components/SerialView.jsx';
 import './App.css';
@@ -224,14 +224,13 @@ function App() {
               ref={gridWrapperRef}
             >
               {currentView === 'dashboard' && (
-                <CanvasGrid
+                <GaugeGrid
                   itemCount={registerValuesRef.current.length}
                   itemSize={200}
                   gap={16}
                   height={gridHeight}
                   data={registerValuesRef.current}
                   configs={localConfigsRef.current}
-                  scrollOptimization={scrollOptimization}
                   tick={tick}
                 />
               )}
