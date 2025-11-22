@@ -3,13 +3,14 @@
   import { SharedWorkerClient } from '../client.js';
   import CanvasGrid from './CanvasGrid.svelte';
   import CanvasTable from './CanvasTable.svelte';
+  import SerialView from './SerialView.svelte';
   import { registers, rawRegisters, registerConfigs } from './stores/registers.js';
 
   let client = null;
   let error = '';
   let selectedDevice = 1;
   let unsubscribe = null;
-  let currentView = 'dashboard'; // 'dashboard' | 'debug'
+  let currentView = 'dashboard'; // 'dashboard' | 'debug' | 'serial'
 
   let gridHeight = 800;
   let itemSize = 200;
@@ -30,10 +31,12 @@
   let frameInterval = 1000 / targetFPS;
   $: frameInterval = 1000 / targetFPS;
   let lastRenderTime = 0;
+  let updateTick = 0;
 
   function updateStores() {
        registers.set(registerValues);
        rawRegisters.set(rawValues);
+       updateTick++;
   }
 
   // Scroll handling logic removed as it's now handled inside CanvasGrid or not needed due to performance
@@ -154,8 +157,7 @@
   onMount(async () => {
     try {
       client = new SharedWorkerClient('./worker.js');
-      // Initial subscribe
-      subscribeToDevice(selectedDevice);
+      // Initial subscribe handled by reactive statement
     } catch (e) {
       error = 'Failed to initialize shared worker: ' + e.message;
     }
@@ -206,6 +208,9 @@
         <button class:active={currentView === 'debug'} on:click={() => currentView = 'debug'}>
           Debug
         </button>
+        <button class:active={currentView === 'serial'} on:click={() => currentView = 'serial'}>
+          Serial
+        </button>
       </div>
 
       <div class="spacer"></div>
@@ -222,7 +227,7 @@
       </select>
     </div>
 
-    {#if $registers.length === 0}
+    {#if $registers.length === 0 && currentView !== 'serial'}
       <div class="loading">Loading device data...</div>
     {:else}
       <div 
@@ -238,15 +243,19 @@
             data={$registers}
             configs={$registerConfigs}
             scrollOptimization={scrollOptimization}
+            tick={updateTick}
           />
-        {:else}
+        {:else if currentView === 'debug'}
           <CanvasTable
             height={gridHeight}
             rawData={$rawRegisters}
             displayData={$registers}
             configs={$registerConfigs}
             scrollOptimization={scrollOptimization}
+            tick={updateTick}
           />
+        {:else if currentView === 'serial'}
+          <SerialView />
         {/if}
       </div>
     {/if}

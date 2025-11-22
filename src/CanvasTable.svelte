@@ -6,6 +6,7 @@
   export let displayData = [];
   export let configs = [];
   export let scrollOptimization = true;
+  export let tick = 0;
   
   let canvas;
   let ctx;
@@ -225,7 +226,7 @@
     }
   }
 
-  $: if (rawData && ctx) requestRender();
+  $: if (rawData && ctx && tick >= 0) requestRender();
   $: if (displayData && ctx) requestRender();
   $: if (configs && ctx) requestRender();
 

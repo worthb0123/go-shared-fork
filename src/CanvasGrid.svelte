@@ -8,6 +8,7 @@
   export let data = []; // Array of values
   export let configs = []; // Array of config objects
   export let scrollOptimization = true;
+  export let tick = 0;
   
   let canvas;
   let ctx;
@@ -468,7 +469,7 @@
   }
 
   // Reactive render when data changes
-  $: if (data && ctx) requestRender();
+  $: if (data && ctx && tick >= 0) requestRender();
   $: if (itemCount && ctx) requestRender(); // Re-render if count changes
   $: if (configs && ctx) requestRender(); // Re-render if configs change
 
