@@ -202,9 +202,14 @@ export function createGaugeAssets(size = 200) {
     glassCtx.translate(-50, -50);
     
     const glarePath = new Path2D("M 50 8.1 A 41.9 41.9 0 0 1 91.9 50 A 45 45 0 0 0 50 30 A 45 45 0 0 0 8.1 50 A 41.9 41.9 0 0 1 50 8.1 Z");
-    grad = glassCtx.createLinearGradient(50, 0, 50, 100); // Vertical gradient roughly
-    grad.addColorStop(0, 'rgba(255,255,255,0.15)');
-    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    
+    // Gradient adjusted to fade out before the center bottom edge of the path (y=30).
+    // The path spans y=8.1 to y=50, but in the center it cuts off at y=30.
+    // Previous gradient went to y=50, leaving ~50% opacity at the cut-off line.
+    grad = glassCtx.createLinearGradient(50, 8, 50, 32); 
+    grad.addColorStop(0, 'rgba(255,255,255,0.25)'); // Slightly softer start
+    grad.addColorStop(1, 'rgba(255,255,255,0)');   // Fade to 0 near the bottom center edge
+    
     glassCtx.fillStyle = grad;
     glassCtx.fill(glarePath);
     glassCtx.restore();
@@ -212,9 +217,9 @@ export function createGaugeAssets(size = 200) {
     // Glass Reflection
     // Circle r=41.9
     grad = glassCtx.createLinearGradient(0, 0, 100, 100);
-    grad.addColorStop(0, 'rgba(255,255,255,0.05)');
+    grad.addColorStop(0, 'rgba(255,255,255,0.15)'); 
     grad.addColorStop(0.5, 'rgba(255,255,255,0)');
-    grad.addColorStop(1, 'rgba(255,255,255,0.05)');
+    grad.addColorStop(1, 'rgba(255,255,255,0.05)'); 
     glassCtx.beginPath();
     glassCtx.arc(50, 50, 41.9, 0, Math.PI * 2);
     glassCtx.fillStyle = grad;
@@ -223,7 +228,7 @@ export function createGaugeAssets(size = 200) {
     // Glass Specular
     // Radial cx=20% cy=20% r=60%
     const rGrad = glassCtx.createRadialGradient(20, 20, 0, 20, 20, 60);
-    rGrad.addColorStop(0, 'rgba(255,255,255,0.25)');
+    rGrad.addColorStop(0, 'rgba(255,255,255,0.3)'); // Slightly softer
     rGrad.addColorStop(1, 'rgba(255,255,255,0)');
     glassCtx.beginPath();
     glassCtx.arc(50, 50, 41.9, 0, Math.PI * 2);
