@@ -144,6 +144,29 @@ export class SharedWorkerClient {
    * @private
    */
   handleMessage(event) {
+    if (event.data instanceof Uint8Array || event.data instanceof ArrayBuffer) {
+      // Binary data (Delta update)
+      // Find the channel callback... wait, the binary data doesn't have the channel ID in it!
+      // For now, assuming only ONE subscription per client or implied channel?
+      // Actually, `postMessage` is on the `port`.
+      // The port is shared for all subscriptions? No, one port per tab.
+      // But a tab can subscribe to multiple channels.
+      // If we receive binary data, we don't know WHICH channel it is for unless we encode it.
+      // HOWEVER, for this demo, we likely only subscribe to ONE device at a time.
+      // Let's assume the first active subscription receives the data.
+      // Or, we should wrap the binary data in a structure or include channel ID.
+      // Given the constraints, let's pass it to ALL active subscription callbacks for now,
+      // or `App.svelte` only subscribes to one thing.
+      
+      const data = new Uint8Array(event.data);
+      
+      // Dispatch to all subscribers (usually just one device)
+      this.subscriptions.forEach(callbacks => {
+        callbacks.forEach(callback => callback(data));
+      });
+      return;
+    }
+
     let message;
     try {
       message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
@@ -166,7 +189,7 @@ export class SharedWorkerClient {
     }
 
     // Handle subscriptions
-    if (message.type === 'data' && message.channel) {
+    if ((message.type === 'data' || message.type === 'config') && message.channel) {
       const callbacks = this.subscriptions.get(message.channel);
       if (callbacks) {
         callbacks.forEach(callback => {

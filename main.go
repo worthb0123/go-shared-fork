@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
@@ -29,12 +30,26 @@ type Response struct {
 	Error     string          `json:"error,omitempty"`
 }
 
+// RegisterConfig holds the static configuration for a register
+type RegisterConfig struct {
+	DisplayMin float64 `json:"displayMin"`
+	DisplayMax float64 `json:"displayMax"`
+	LowWarn    float64 `json:"lowWarn"`
+	HighWarn   float64 `json:"highWarn"`
+	LowFault   float64 `json:"lowFault"`
+	HighFault  float64 `json:"highFault"`
+	Offset     float64 `json:"offset"`
+	Scale      float64 `json:"scale"`
+	Color      string  `json:"color"`
+}
+
 // Register represents a single register with internal and published values
 type Register struct {
-	Published      int     `json:"published"`
-	Internal       float64 `json:"internal"`
-	IncDec         float64 `json:"incDec"`
-	PrevPublished  int     `json:"prevPublished"`
+	Published      int            `json:"published"`
+	Internal       float64        `json:"internal"`
+	IncDec         float64        `json:"incDec"`
+	PrevPublished  int            `json:"prevPublished"`
+	Config         RegisterConfig `json:"config"`
 }
 
 // Device represents a device with registers
@@ -55,12 +70,19 @@ type DeviceData struct {
 	Registers []int `json:"registers"`
 }
 
+// DeviceConfigData holds configuration for all registers of a device
+type DeviceConfigData struct {
+	ID      int              `json:"id"`
+	Configs []RegisterConfig `json:"configs"`
+}
+
 // Subscription represents a client's subscription to a channel
 type Subscription struct {
 	ClientID       string
 	Port           js.Value
 	TargetInterval time.Duration
 	LastSent       time.Time
+	LastKnownState []int
 }
 
 // SharedWorker manages subscriptions and broadcasts data to subscribed clients
@@ -85,6 +107,8 @@ func init() {
 	
 	// Initialize devices
 	rand.Seed(time.Now().UnixNano())
+	colors := []string{"#ef4444", "#f59e0b", "#f97316", "#10b981", "#3b82f6", "#000000", "#ffffff"} // Red, Yellow, Orange, Green, Blue, Black, White
+
 	for deviceID := 1; deviceID <= 2; deviceID++ {
 		device := &Device{
 			ID:        deviceID,
@@ -103,12 +127,49 @@ func init() {
 					incDec = 0.1
 				}
 			}
+
+			// Generate Config
+			offset := (rand.Float64() * 10) - 5 // -5 to +5
+			scale := (rand.Float64() * 4) + 1   // +1 to +5
+
+			// DisplayMax: 100 * Scale + Offset
+			rawMax := (100.0 * math.Abs(scale)) + offset
+			displayMax := math.Ceil(rawMax/5.0) * 5.0
+
+			// DisplayMin: Offset
+			rawMin := offset
+			displayMin := math.Floor(rawMin/5.0) * 5.0
+			
+			// Ensure Min < Max
+			if displayMin >= displayMax {
+				displayMax = displayMin + 100
+			}
+
+			// Ranges based on Max
+			// Note: These should probably be relative to the range (Max - Min), but prompt said "of DisplayMax"
+			lowFault := displayMax * 0.05
+			lowWarn := displayMax * 0.10
+			highWarn := displayMax * 0.80
+			highFault := displayMax * 0.90
+			
+			color := colors[rand.Intn(len(colors))]
 			
 			device.Registers[i] = Register{
 				Published:     published,
 				Internal:      float64(published),
 				IncDec:        incDec,
 				PrevPublished: published,
+				Config: RegisterConfig{
+					DisplayMin: displayMin,
+					DisplayMax: displayMax,
+					LowWarn:    lowWarn,
+					HighWarn:   highWarn,
+					LowFault:   lowFault,
+					HighFault:  highFault,
+					Offset:     offset,
+					Scale:      scale,
+					Color:      color,
+				},
 			}
 		}
 		worker.devices[deviceID] = device
@@ -209,42 +270,139 @@ func (sw *SharedWorker) Broadcast() {
 			continue
 		}
 
-		// Pre-calculate snapshot for this device to avoid repeated allocation
-		// We only marshal if at least one subscriber needs it
-		var cachedSnapshot []byte
+		// Current state for diffing
+		currentState := make([]int, len(device.Registers))
+		for i := range device.Registers {
+			currentState[i] = device.Registers[i].Published
+		}
 
 		for i := range subs {
 			sub := &subs[i] // Pointer to update LastSent
 			if now.Sub(sub.LastSent) >= sub.TargetInterval {
 				
-				// Generate snapshot if not already done
-				if cachedSnapshot == nil {
-					allRegisters := make([]int, len(device.Registers))
-					for r := range device.Registers {
-						allRegisters[r] = device.Registers[r].Published
-					}
-					deviceData := DeviceData{
-						ID:        deviceID,
-						Registers: allRegisters,
-					}
-					cachedSnapshot, _ = json.Marshal(deviceData)
+				// Initialize LastKnownState if nil (should happen on Subscribe, but just in case)
+				if sub.LastKnownState == nil {
+					sub.LastKnownState = make([]int, len(currentState))
+					// Assume client has nothing (all zeros)
 				}
 
-				// Send
-				response := Response{
-					Type:    "data",
-					Channel: channel,
-					Data:    cachedSnapshot,
+				// Generate delta
+				deltaBuf := EncodeDelta(currentState, sub.LastKnownState)
+
+				if len(deltaBuf) > 0 {
+					// HACK: We can't easily mix JSON control messages and Raw Binary messages on the same port 
+					// unless we handle it on client.
+					// Let's just send the raw Uint8Array. Client check `typeof data`.
+					// Convert Go []byte to JS Uint8Array
+					
+					uint8Array := js.Global().Get("Uint8Array").New(len(deltaBuf))
+					js.CopyBytesToJS(uint8Array, deltaBuf)
+					sub.Port.Call("postMessage", uint8Array)
+
+					// Update LastKnownState
+					copy(sub.LastKnownState, currentState)
 				}
-				sw.sendToPort(sub.Port, response)
+				
 				sub.LastSent = now
 			}
 		}
 	}
 }
 
-// GetDeviceSnapshot returns a full snapshot of a device's registers
-func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, error) {
+// EncodeDelta generates a binary delta buffer
+func EncodeDelta(current, prev []int) []byte {
+	var buf []byte
+	
+	i := 0
+	for i < len(current) {
+		// Skip unchanged
+		if i < len(prev) && current[i] == prev[i] {
+			i++
+			continue
+		}
+
+		// Found a change at i
+		// Determine if it's a run or isolated
+		runStart := i
+		runLen := 0
+		
+		// Look ahead for continuous changes (run)
+		// A "run" is a sequence of changed values.
+		// But wait, the protocol supports "Run of sequential registers".
+		// We can send *any* sequence of registers as a run, even if some didn't change?
+		// No, that wastes bandwidth.
+		// We should only encode *changed* values.
+		// If we have changed, changed, changed -> Run.
+		// If we have changed, unchanged, changed -> Pair, Pair (or Run if unchanged is short?)
+		
+		// Simple greedy approach:
+		// Find consecutive changes.
+		for i < len(current) && runLen < 255 {
+			if i < len(prev) && current[i] == prev[i] {
+				break
+			}
+			runLen++
+			i++
+		}
+
+		// If runLen >= 2, encode as Run (0x02)
+		// If runLen == 1, encode as Pair (0x01)
+		if runLen >= 2 {
+			// Opcode 0x02: [2] [IdxLo] [IdxHi] [Count] [Val...]
+			buf = append(buf, 2)
+			buf = append(buf, byte(runStart&0xFF), byte(runStart>>8))
+			buf = append(buf, byte(runLen))
+			for k := 0; k < runLen; k++ {
+				buf = append(buf, byte(current[runStart+k]))
+			}
+		} else if runLen == 1 {
+			// Opcode 0x01: [1] [IdxLo] [IdxHi] [Val]
+			buf = append(buf, 1)
+			buf = append(buf, byte(runStart&0xFF), byte(runStart>>8))
+			buf = append(buf, byte(current[runStart]))
+		}
+	}
+	return buf
+}
+
+// GetDeviceSnapshot returns a full snapshot as a binary Run
+func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, []int, error) {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+
+	device, ok := sw.devices[deviceID]
+	if !ok {
+		return nil, nil, fmt.Errorf("device not found")
+	}
+
+	state := make([]int, len(device.Registers))
+	for i, reg := range device.Registers {
+		state[i] = reg.Published
+	}
+
+	// Create binary snapshot (One giant run)
+	// Since count is byte (max 255), we need multiple runs
+	var buf []byte
+	for i := 0; i < len(state); i += 255 {
+		count := 255
+		if i+count > len(state) {
+			count = len(state) - i
+		}
+		
+		// Opcode 0x02 (Run)
+		buf = append(buf, 2)
+		buf = append(buf, byte(i&0xFF), byte(i>>8))
+		buf = append(buf, byte(count))
+		for k := 0; k < count; k++ {
+			buf = append(buf, byte(state[i+k]))
+		}
+	}
+
+	return buf, state, nil
+}
+
+// GetDeviceConfig returns the full configuration for a device
+func (sw *SharedWorker) GetDeviceConfig(deviceID int) ([]byte, error) {
 	sw.mu.RLock()
 	defer sw.mu.RUnlock()
 
@@ -253,17 +411,17 @@ func (sw *SharedWorker) GetDeviceSnapshot(deviceID int) ([]byte, error) {
 		return nil, fmt.Errorf("device not found")
 	}
 
-	allRegisters := make([]int, len(device.Registers))
+	configs := make([]RegisterConfig, len(device.Registers))
 	for i, reg := range device.Registers {
-		allRegisters[i] = reg.Published
+		configs[i] = reg.Config
 	}
 
-	deviceData := DeviceData{
-		ID:        deviceID,
-		Registers: allRegisters,
+	configData := DeviceConfigData{
+		ID:      deviceID,
+		Configs: configs,
 	}
 
-	return json.Marshal(deviceData)
+	return json.Marshal(configData)
 }
 
 // Subscribe adds a client to a channel's subscription list
@@ -296,11 +454,48 @@ func (sw *SharedWorker) Subscribe(clientID string, channel string, port js.Value
 	if strings.HasPrefix(channel, "device_") {
 		var deviceID int
 		if _, scanErr := fmt.Sscanf(channel, "device_%d", &deviceID); scanErr == nil {
-			initialData, err = sw.GetDeviceSnapshot(deviceID)
-			if err != nil {
-				// Log error or ignore? For now, if device not found, we send nothing
+			var snapshotBuf []byte
+			var state []int
+			snapshotBuf, state, err = sw.GetDeviceSnapshot(deviceID)
+			
+			if err == nil {
+				// Update subscription with state
+				// Re-acquire lock to find subscription and update it
+				// Note: This is inefficient (O(N) scan), but Subscribe is rare.
+				sw.mu.Lock()
+				for i := range sw.subscriptions[channel] {
+					if sw.subscriptions[channel][i].ClientID == clientID {
+						sw.subscriptions[channel][i].LastKnownState = state
+						break
+					}
+				}
+				sw.mu.Unlock()
+
+				// Send binary snapshot
+				uint8Array := js.Global().Get("Uint8Array").New(len(snapshotBuf))
+				js.CopyBytesToJS(uint8Array, snapshotBuf)
+				port.Call("postMessage", uint8Array)
+				
+				// We sent the data, so no need to send JSON response with Data
+				initialData = nil
+			} else {
 				initialData = nil
 			}
+
+			// Send Config Snapshot (JSON)
+			configBytes, err := sw.GetDeviceConfig(deviceID)
+			if err == nil {
+				// We send this as a "data" message but logically it's config.
+				// Let's use a "config" type response.
+				// But `sendToPort` takes a Response.
+				resp := Response{
+					Type:    "config",
+					Channel: channel,
+					Data:    json.RawMessage(configBytes),
+				}
+				sw.sendToPort(port, resp)
+			}
+
 		}
 	} else {
 		sw.mu.RLock()

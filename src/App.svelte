@@ -1,80 +1,45 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { SharedWorkerClient } from '../client.js';
-  import RadialGauge from './RadialGauge.svelte';
-  import { Grid } from 'svelte-virtual';
-  import { registers } from './stores/registers.js';
+  import CanvasGrid from './CanvasGrid.svelte';
+  import CanvasTable from './CanvasTable.svelte';
+  import SerialView from './SerialView.svelte';
+  import { registers, rawRegisters, registerConfigs } from './stores/registers.js';
 
   let client = null;
   let error = '';
   let selectedDevice = 1;
   let unsubscribe = null;
+  let currentView = 'dashboard'; // 'dashboard' | 'debug' | 'serial'
 
   let gridHeight = 800;
-  let itemSize = 160;
+  let itemSize = 200;
   let gap = 16;
   let registerValues = []; // Store register values by number (array index)
+  let rawValues = []; // Store raw values
+  let localConfigs = []; // Local mirror of configs for fast access
   let isScrolling = false;
-  let scrollTimeout = null;
-  let scrollTimeoutMs = 300;
-  // let gridContainerElement = null; // Removed
-  let lastScrollPosition = 0;
-  let scrollCheckInterval = null;
-  let isPointerDown = false;
+  let scrollOptimization = true;
+  // let scrollTimeout = null;
+  // let scrollTimeoutMs = 300;
+  // let lastScrollPosition = 0;
+  // let scrollCheckInterval = null;
+  // let isPointerDown = false;
 
   // Configurable target FPS
   let targetFPS = 60;
   let frameInterval = 1000 / targetFPS;
   $: frameInterval = 1000 / targetFPS;
   let lastRenderTime = 0;
-  let pendingUpdates = null;
-  let rafId = null;
+  let updateTick = 0;
 
-  // Throttled render loop: Updates store only at target FPS
-  function renderLoop(currentTime) {
-    if (!isScrolling && currentTime - lastRenderTime >= frameInterval && pendingUpdates) {
-      // Update register values from flat array
-      // Since pendingUpdates is now just [val0, val1, ...], and we want to
-      // update our local state, we can just replace the array or copy values.
-      // Replacing is faster and safe since we are just displaying values.
-      registerValues = pendingUpdates;
-      
-      // Update the store
-      registers.set(registerValues);
-      pendingUpdates = null;
-      lastRenderTime = currentTime;
-    }
-    rafId = requestAnimationFrame(renderLoop);
+  function updateStores() {
+       registers.set(registerValues);
+       rawRegisters.set(rawValues);
+       updateTick++;
   }
 
-  function handleScroll() {
-    isScrolling = true;
-    // Clear existing timeout if user is still scrolling
-    if (scrollTimeout) clearTimeout(scrollTimeout);
-    // Set timeout to detect when scrolling has stopped
-    scrollTimeout = setTimeout(() => {
-      // Only resume updates if pointer is not down (scrollbar is released)
-      if (!isPointerDown) {
-        isScrolling = false;
-      }
-      scrollTimeout = null;
-    }, scrollTimeoutMs);
-  }
-
-  function handlePointerDown() {
-    isPointerDown = true;
-    handleScroll(); // Pause updates immediately when pointer down
-  }
-
-  function handlePointerUp() {
-    isPointerDown = false;
-    // If no scroll timeout is active, it means we either weren't scrolling 
-    // or the timeout expired while the pointer was down. 
-    // In either case, we should ensure updates are resumed.
-    if (!scrollTimeout) {
-      isScrolling = false;
-    }
-  }
+  // Scroll handling logic removed as it's now handled inside CanvasGrid or not needed due to performance
 
   function handleDeviceChange(event) {
     selectedDevice = parseInt(event.target.value);
@@ -93,9 +58,96 @@
 
     unsubscribe = client.subscribe(channel, (data) => {
       try {
-        // Data is already parsed by client.js
-        // data.registers is now a flat array of integers
-        pendingUpdates = data.registers;
+        // Handle Config Update (Object with configs array)
+        if (data && data.configs && Array.isArray(data.configs)) {
+          const isFirstConfig = localConfigs.length === 0;
+          localConfigs = data.configs;
+          registerConfigs.set(data.configs);
+          
+          // Also ensure registerValues is large enough
+          if (registerValues.length < localConfigs.length) {
+             for (let i = registerValues.length; i < localConfigs.length; i++) {
+                 registerValues[i] = 0;
+                 rawValues[i] = 0;
+             }
+          }
+
+          // If this is the first config we've received, the current registerValues 
+          // (populated by the initial snapshot or defaults) are raw/unscaled.
+          // We need to apply the configuration to them.
+          if (isFirstConfig) {
+              for (let i = 0; i < registerValues.length; i++) {
+                  rawValues[i] = registerValues[i]; // Capture what was there as raw
+                  const config = localConfigs[i];
+                  if (config) {
+                      registerValues[i] = registerValues[i] * config.scale + config.offset;
+                  }
+              }
+          }
+          
+          updateStores();
+          return;
+        }
+
+        // data is Uint8Array
+        if (data instanceof Uint8Array) {
+          let ptr = 0;
+          while (ptr < data.length) {
+            const opcode = data[ptr++];
+            if (opcode === 1) { // Pair
+              const idx = data[ptr] | (data[ptr+1] << 8);
+              const val = data[ptr+2];
+              ptr += 3;
+              
+              // Grow array if needed
+              if (idx >= registerValues.length) {
+                 for (let i = registerValues.length; i <= idx; i++) {
+                    registerValues[i] = 0;
+                    rawValues[i] = 0;
+                 }
+              }
+              
+              // Apply config scale/offset
+              rawValues[idx] = val;
+              const config = localConfigs[idx];
+              if (config) {
+                  // Value = RawValue * Scale + Offset
+                  registerValues[idx] = val * config.scale + config.offset;
+              } else {
+                  registerValues[idx] = val;
+              }
+              
+            } else if (opcode === 2) { // Run
+              const startIdx = data[ptr] | (data[ptr+1] << 8);
+              const count = data[ptr+2];
+              ptr += 3;
+              
+              // Grow array if needed
+              if (startIdx + count > registerValues.length) {
+                 for (let i = registerValues.length; i < startIdx + count; i++) {
+                    registerValues[i] = 0;
+                    rawValues[i] = 0;
+                 }
+              }
+              
+              for (let i = 0; i < count; i++) {
+                const rawVal = data[ptr++];
+                const idx = startIdx + i;
+                
+                rawValues[idx] = rawVal;
+                const config = localConfigs[idx];
+                if (config) {
+                    registerValues[idx] = rawVal * config.scale + config.offset;
+                } else {
+                    registerValues[idx] = rawVal;
+                }
+              }
+            }
+          }
+          
+          // Trigger Svelte update
+          updateStores();
+        } 
       } catch (e) {
         console.error('Error processing device data:', e);
       }
@@ -105,10 +157,7 @@
   onMount(async () => {
     try {
       client = new SharedWorkerClient('./worker.js');
-      // Start render loop
-      rafId = requestAnimationFrame(renderLoop);
-      // Initial subscribe
-      subscribeToDevice(selectedDevice);
+      // Initial subscribe handled by reactive statement
     } catch (e) {
       error = 'Failed to initialize shared worker: ' + e.message;
     }
@@ -118,12 +167,6 @@
     if (unsubscribe) {
       unsubscribe();
     }
-    if (rafId) {
-      cancelAnimationFrame(rafId);
-    }
-    if (scrollTimeout) {
-      clearTimeout(scrollTimeout);
-    }
   });
 
   $: if (client && selectedDevice && targetFPS) {
@@ -131,12 +174,10 @@
   }
 </script>
 
-<svelte:window on:pointerup={handlePointerUp} />
-
 <main>
   <h1>Device Register Monitor</h1>
   <p style="font-size:0.9em; color:#666;">
-    Live Data • Throttled @ {targetFPS} FPS • Virtual Scrolling
+    Live Data • Throttled @ {targetFPS} FPS • Canvas Rendering
   </p>
 
   {#if error}
@@ -153,53 +194,69 @@
 
       <div class="spacer"></div>
 
+      <label class="checkbox-label">
+        <input type="checkbox" checked={scrollOptimization} on:change={(e) => scrollOptimization = e.currentTarget.checked}>
+        Scroll Optimization
+      </label>
+
+      <div class="spacer"></div>
+
+      <div class="view-toggle">
+        <button class:active={currentView === 'dashboard'} on:click={() => currentView = 'dashboard'}>
+          Dashboard
+        </button>
+        <button class:active={currentView === 'debug'} on:click={() => currentView = 'debug'}>
+          Debug
+        </button>
+        <button class:active={currentView === 'serial'} on:click={() => currentView = 'serial'}>
+          Serial
+        </button>
+      </div>
+
+      <div class="spacer"></div>
+
       <label for="fps-select">Target FPS:</label>
       <select id="fps-select" bind:value={targetFPS}>
         <option value={2}>2 FPS</option>
         <option value={4}>4 FPS</option>
         <option value={10}>10 FPS</option>
+        <!-- Higher FPS removed as per 10Hz cap, but keeping in UI if user wants to request it -->
         <option value={15}>15 FPS</option>
         <option value={30}>30 FPS</option>
         <option value={60}>60 FPS</option>
       </select>
-
-      <label for="scroll-timeout-input">Scroll Pause (ms):</label>
-      <input
-        id="scroll-timeout-input"
-        type="number"
-        bind:value={scrollTimeoutMs}
-        min="0"
-        max="5000"
-        step="100"
-      />
     </div>
 
-    {#if $registers.length === 0}
+    {#if $registers.length === 0 && currentView !== 'serial'}
       <div class="loading">Loading device data...</div>
     {:else}
       <div 
         class="grid-wrapper" 
         bind:clientHeight={gridHeight}
-        on:wheel={handleScroll}
-        on:scroll|capture={handleScroll}
-        on:pointerdown={handlePointerDown}
       >
-        <Grid
-          itemCount={$registers.length}
-          itemHeight={itemSize + gap}
-          itemWidth={itemSize + gap}
-          height={gridHeight}
-          overscan={2}
-        >
-          {#snippet item({ index, style })}
-            <div class="gauge-wrapper" {style}>
-              <RadialGauge
-                registerNumber={index}
-                value={$registers[index] ?? 0}
-              />
-            </div>
-          {/snippet}
-        </Grid>
+        {#if currentView === 'dashboard'}
+          <CanvasGrid
+            itemCount={$registers.length}
+            itemSize={itemSize}
+            gap={gap}
+            height={gridHeight}
+            data={$registers}
+            configs={$registerConfigs}
+            scrollOptimization={scrollOptimization}
+            tick={updateTick}
+          />
+        {:else if currentView === 'debug'}
+          <CanvasTable
+            height={gridHeight}
+            rawData={$rawRegisters}
+            displayData={$registers}
+            configs={$registerConfigs}
+            scrollOptimization={scrollOptimization}
+            tick={updateTick}
+          />
+        {:else if currentView === 'serial'}
+          <SerialView />
+        {/if}
       </div>
     {/if}
   {:else}
@@ -211,7 +268,7 @@
   :global(body) {
     margin: 0;
     font-family: system-ui, -apple-system, sans-serif;
-    background-color: #f5f5f5;
+    background-color: #000;
   }
 
   :global(#app) {
@@ -232,12 +289,12 @@
   h1 {
     margin: 0 0 8px 0;
     font-size: 28px;
-    color: #333;
+    color: #eee;
   }
 
   p {
     margin: 0 0 16px 0;
-    color: #666;
+    color: #999;
   }
 
   .controls {
@@ -246,7 +303,7 @@
     gap: 20px;
     margin-bottom: 16px;
     padding: 16px;
-    background: white;
+    background: #1a1a1a;
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     flex-wrap: wrap;
@@ -254,30 +311,24 @@
 
   label {
     font-weight: 600;
-    color: #333;
+    color: #eee;
   }
 
-  select,
-  input[type='number'] {
+  select {
     padding: 8px 12px;
-    border: 1px solid #ccc;
+    border: 1px solid #444;
+    background: #333;
+    color: #eee;
     border-radius: 4px;
     font-size: 16px;
     cursor: pointer;
   }
 
-  input[type='number'] {
-    cursor: text;
-    width: 100px;
-  }
-
-  select:hover,
-  input[type='number']:hover {
+  select:hover {
     border-color: #999;
   }
 
-  select:focus,
-  input[type='number']:focus {
+  select:focus {
     outline: none;
     border-color: #0066cc;
     box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.1);
@@ -285,6 +336,48 @@
 
   .spacer {
     flex: 1;
+  }
+
+  .view-toggle {
+    display: flex;
+    gap: 1px;
+    background: #444;
+    border-radius: 4px;
+    padding: 2px;
+  }
+
+  .view-toggle button {
+    background: transparent;
+    border: none;
+    color: #999;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    border-radius: 2px;
+    transition: all 0.2s;
+  }
+
+  .view-toggle button.active {
+    background: #666;
+    color: #fff;
+  }
+
+  .view-toggle button:hover:not(.active) {
+    color: #eee;
+  }
+
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .checkbox-label input {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
   }
 
   .error-banner {
@@ -304,18 +397,12 @@
   }
 
   .grid-wrapper {
-    background: white;
+    background: #000;
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     overflow: hidden;
     flex: 1;
     min-height: 0;
-  }
-
-  .gauge-wrapper {
-    display: flex;
-    justify-content: center;
-    align-items: center;
   }
 
   @media (max-width: 768px) {
