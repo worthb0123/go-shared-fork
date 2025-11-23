@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { createGaugeAssets } from './gauge-assets.js';
+  import { createGaugeAssetAtlas } from './gauge-assets.js';
 
   export let itemCount = 0;
   export let itemSize = 160;
@@ -99,7 +99,7 @@
     // Re-generate sprites if scale changed significantly? 
     // For now, just generate them once at high res (e.g. based on itemSize * dpr)
     if (!sprites) {
-         sprites = createGaugeAssets(itemSize * dpr); // Generate at native resolution
+         sprites = createGaugeAssetAtlas(itemSize * dpr, 16); // 16 variations
     }
     
     requestRender();
@@ -156,9 +156,22 @@
     // "activeColorRange" logic matches ranges. 
     // Here we simplify: if we are in a warn/fault zone, we light up.
     
+    // --- Calculate Variation Index based on position ---
+    // Use x and y to select a sprite from the atlas.
+    // y is effectively absolute since it comes from row * height.
+    // We map the sum of x and y to the atlas index.
+    // Assuming atlas has 16 items.
+    const len = sprites.backgrounds.length;
+    // Fix: Ensure index is positive even if y is negative (scrolled off top)
+    const val = Math.floor((x + y) / size);
+    const variationIndex = ((val % len) + len) % len;
+    
+    const bgSprite = sprites.backgrounds[variationIndex];
+    const glassSprite = sprites.glasses[variationIndex];
+    
     // --- 1. Background (Cached Sprite) ---
     if (sprites) {
-        ctx.drawImage(sprites.background, x, y, size, size);
+        ctx.drawImage(bgSprite, x, y, size, size);
     }
 
     // --- 2. Corner LEDs (Active State) ---
@@ -296,7 +309,7 @@
     if (sprites) {
         ctx.save();
         ctx.globalAlpha = 0.5;
-        ctx.drawImage(sprites.glass, x, y, size, size);
+        ctx.drawImage(glassSprite, x, y, size, size);
         ctx.restore();
     }
   }
