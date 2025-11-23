@@ -1,5 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import { createGaugeAssets } from './gauge-assets.js';
 
   export let itemCount = 0;
   export let itemSize = 160;
@@ -17,8 +18,7 @@
   let renderScrollTop = 0;
   let rafId;
   let scroller;
-  let bgImage;
-  let bgImageLoaded = false;
+  let sprites;
   
   // Turbo Scroll State
   let wheelMomentum = 0;
@@ -96,6 +96,12 @@
     ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
     
+    // Re-generate sprites if scale changed significantly? 
+    // For now, just generate them once at high res (e.g. based on itemSize * dpr)
+    if (!sprites) {
+         sprites = createGaugeAssets(itemSize * dpr); // Generate at native resolution
+    }
+    
     requestRender();
   }
 
@@ -126,204 +132,173 @@
     const highWarn = config.highWarn ?? 90;
     const lowFault = config.lowFault ?? 5;
     const highFault = config.highFault ?? 95;
-    const baseColor = config.color ?? '#f59e0b'; // Default amber if no color
+    const labelText = config.label || "TEMP"; // Need label
 
     // Configuration
-    const highlightColor = baseColor; 
     // Reduce scale for internal elements to create clearance
-    const innerScale = scale * 0.92; 
+    // The sprites are designed for 100x100 fit. 
+    // The background sprite is 200x200 (or whatever generated).
+    // We draw it into size x size.
     
     // --- Color Theme Selection ---
-    // Assign theme based on index to ensure stability (random-looking but deterministic)
-    // Theme 0: Amber/Red (Standard)
-    // Theme 1: Orange/Purple
-    // Theme 2: Blue/Green
     const themeIndex = index % 3;
+    let activeColor;
+    if (themeIndex === 0) activeColor = '#ef4444'; // Red
+    else if (themeIndex === 1) activeColor = '#d946ef'; // Purple
+    else activeColor = '#10b981'; // Green
+
+    // Determine Active State Color (for Glow/Leds/Arcs)
+    let stateColor = null;
+    if (value >= highFault || value <= lowFault) stateColor = activeColor; // Fault
+    else if (value >= highWarn || value <= lowWarn) stateColor = config.color || '#f59e0b'; // Warn
     
-    let warnColor, faultColor;
+    // For the React component logic:
+    // "activeColorRange" logic matches ranges. 
+    // Here we simplify: if we are in a warn/fault zone, we light up.
     
-    if (themeIndex === 0) {
-        warnColor = '#f59e0b'; // Amber
-        faultColor = '#ef4444'; // Red
-    } else if (themeIndex === 1) {
-        warnColor = '#f97316'; // Orange
-        faultColor = '#d946ef'; // Purple (Fuchsia)
-    } else {
-        warnColor = '#3b82f6'; // Blue
-        faultColor = '#10b981'; // Emerald/Green
+    // --- 1. Background (Cached Sprite) ---
+    if (sprites) {
+        ctx.drawImage(sprites.background, x, y, size, size);
     }
 
-    ctx.save();
-    ctx.translate(x, y);
-    
-    // --- 1. Background (Cached SVG) ---
-    if (bgImageLoaded && bgImage) {
-        ctx.drawImage(bgImage, 0, 0, size, size);
-    } else {
-        // Fallback if image not loaded yet
-        ctx.beginPath();
-        ctx.arc(50 * scale, 50 * scale, 48 * scale, 0, 2 * Math.PI);
-        ctx.fillStyle = '#1a1c21';
-        ctx.fill();
-    }
-
-    // --- 2. Active/Warning Range Arcs ---
-    // Use innerScale for these to shrink them away from the rim
-    const arcR = 35 * innerScale; // Radius for the colored bars
-    
-    // Determine Active Color State
-    let activeStateColor = null;
-    if (value >= highFault || value <= lowFault) activeStateColor = faultColor;
-    else if (value >= highWarn || value <= lowWarn) activeStateColor = warnColor;
-
-    // --- Dynamic Glow (Center out) ---
-    if (activeStateColor) {
+    // --- 2. Corner LEDs (Active State) ---
+    // Sprite has "off" state. If active, we draw "on" state on top.
+    if (stateColor) {
+        // Helper to draw active LED
+        const drawActiveLed = (lx, ly) => {
+             const px = x + lx * scale;
+             const py = y + ly * scale;
+             ctx.beginPath();
+             ctx.arc(px, py, 3.2 * scale, 0, Math.PI*2);
+             ctx.fillStyle = stateColor;
+             ctx.fill();
+             
+             // Glossy overlay (simple white alpha)
+             const grad = ctx.createRadialGradient(px-1*scale, py-1*scale, 0, px, py, 3.2*scale);
+             grad.addColorStop(0, 'rgba(255,255,255,0.4)');
+             grad.addColorStop(1, 'rgba(255,255,255,0)');
+             ctx.fillStyle = grad;
+             ctx.fill();
+        };
+        drawActiveLed(10, 10);
+        drawActiveLed(90, 10);
+        drawActiveLed(90, 90);
+        drawActiveLed(10, 90);
+        
+        // --- Glow Effect (Behind ticks) ---
+        // React uses a radial gradient in defs for glow.
+        // We can draw it here on top of background but behind text.
+        // cx=50 cy=63 r=31
         ctx.save();
+        ctx.globalAlpha = 0.5;
+        const gcx = x + 50 * scale;
+        const gcy = y + 63 * scale;
+        const gr = 31 * scale;
+        const glow = ctx.createRadialGradient(gcx, gcy, 0, gcx, gcy, gr);
+        glow.addColorStop(0, stateColor);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        
+        // Clip to arc range? React does: 
+        // <path d={describeArcPath...} fill={`url(#${glowId})`} />
+        // It draws the glow ONLY inside the min/max angle arc.
+        
+        const startRad = (minAngle - 90) * Math.PI / 180;
+        const endRad = (maxAngle - 90) * Math.PI / 180;
+        
         ctx.beginPath();
-        ctx.moveTo(50 * scale, 63 * scale); // Pivot center
-        // Create a pie slice clipping region
-        ctx.arc(50 * scale, 63 * scale, 48 * scale, startAngleRad, endAngleRad);
+        ctx.moveTo(gcx, gcy);
+        ctx.arc(gcx, gcy, gr, startRad, endRad);
         ctx.closePath();
-        ctx.clip();
-
-        // Gradient: Pivot -> Out
-        const glowGrad = ctx.createRadialGradient(50 * scale, 63 * scale, 0, 50 * scale, 63 * scale, 40 * scale);
-        // Parse hex to rgba for transparency
-        // Simple hex parser for known colors
-        let r=0, g=0, b=0;
-        
-        // Generic Hex Parser
-        if (activeStateColor.startsWith('#')) {
-             const hex = activeStateColor.substring(1);
-             if (hex.length === 6) {
-                 r = parseInt(hex.substr(0,2), 16);
-                 g = parseInt(hex.substr(2,2), 16);
-                 b = parseInt(hex.substr(4,2), 16);
-             }
-        }
-        
-        glowGrad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.4)`);
-        glowGrad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
-        
-        ctx.fillStyle = glowGrad;
-        ctx.fillRect(0, 0, 100 * scale, 100 * scale);
+        ctx.fillStyle = glow;
+        ctx.fill();
         ctx.restore();
     }
 
-    // --- Dynamic Bezel Ring ---
-    // If active, draw a colored ring over the default one in the background
-    if (activeStateColor) {
-        ctx.beginPath();
-        ctx.arc(50 * scale, 50 * scale, 40.5 * scale, 0, 2 * Math.PI);
-        ctx.strokeStyle = activeStateColor;
-        ctx.lineWidth = 1 * scale;
-        ctx.stroke();
-    }
+    // --- 3. Active Range Arcs ---
+    // Draw the colored segments
+    // React maps `colorRanges`. We infer them from lowWarn/HighWarn etc.
+    // Geometry: gcx=50, gcy=63, gr1=27, gr2=31.
+    const gcx = x + 50 * scale;
+    const gcy = y + 63 * scale;
+    const gr1 = 27 * scale;
+    const gr2 = 31 * scale;
+    const midR = (gr1 + gr2) / 2;
+    const widthR = gr2 - gr1;
 
     ctx.lineCap = 'butt';
-    ctx.lineWidth = 3 * innerScale;
+    ctx.lineWidth = widthR;
     
-    // Helper to draw arc segment
-    function drawRangeArc(startVal, endVal, color) {
-        if (startVal >= endVal) return;
-        const startRad = getAngle(startVal, minVal, maxVal);
-        const endRad = getAngle(endVal, minVal, maxVal);
+    function drawArcSeg(v1, v2, c) {
+        if (v1 >= v2) return;
+        const a1 = getAngle(v1, minVal, maxVal);
+        const a2 = getAngle(v2, minVal, maxVal);
         ctx.beginPath();
-        // Use scaled pivot center
-        ctx.arc(50 * scale, 63 * scale, arcR, startRad, endRad);
-        ctx.strokeStyle = color;
+        ctx.arc(gcx, gcy, midR, a1, a2);
+        ctx.strokeStyle = c;
         ctx.stroke();
     }
 
-    // Draw ranges
-    // Low Fault (Min to LowFault)
-    if (lowFault > minVal) drawRangeArc(minVal, lowFault, faultColor);
-    // Low Warn (LowFault to LowWarn)
-    if (lowWarn > lowFault) drawRangeArc(lowFault, lowWarn, warnColor);
-    
-    // High Warn (HighWarn to HighFault)
-    if (highFault > highWarn) drawRangeArc(highWarn, highFault, warnColor);
-    // High Fault (HighFault to Max)
-    if (maxVal > highFault) drawRangeArc(highFault, maxVal, faultColor);
-    
-    // --- 3. Ticks (Handled by SVG Background) ---
-    const tickCenter = { x: 50 * scale, y: 63 * scale };
+    if (lowFault > minVal) drawArcSeg(minVal, lowFault, '#ef4444');
+    if (lowWarn > lowFault) drawArcSeg(lowFault, lowWarn, '#f59e0b');
+    if (highFault > highWarn) drawArcSeg(highWarn, highFault, '#f59e0b');
+    if (maxVal > highFault) drawArcSeg(highFault, maxVal, '#ef4444');
 
-    // --- 4. Labels ---
+    // --- 4. Text ---
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#A9ABAF'; 
     
-    // Min/Max - positioned relative to the arc start/end
-    // Calculate pos based on minAngle/maxAngle radii
-    const labelR = 22 * innerScale; // Closer to center
-    // Min
-    let rad = (minAngle - 90) * Math.PI / 180;
-    ctx.font = `${8 * innerScale}px system-ui, sans-serif`;
-    ctx.fillText(Math.round(minVal), tickCenter.x + labelR * Math.cos(rad) + 2*scale, tickCenter.y + labelR * Math.sin(rad) - 2*scale);
-    // Max
-    rad = (maxAngle - 90) * Math.PI / 180;
-    ctx.fillText(Math.round(maxVal), tickCenter.x + labelR * Math.cos(rad) - 2*scale, tickCenter.y + labelR * Math.sin(rad) - 2*scale);
-
-    // Value (Main)
-    ctx.fillStyle = '#E8E6E7'; 
-    ctx.font = `bold ${16 * scale}px system-ui, sans-serif`;
-    // Display Value
-    let displayValue = value;
-    // Format decimal if needed
-    const valueStr = (Math.abs(value) < 10 && value % 1 !== 0) ? value.toFixed(1) : Math.floor(value).toString();
-    
-    ctx.fillText(valueStr, 50 * scale, 75 * scale);
-    
-    // Units
+    // Min/Max
+    ctx.font = `${6 * scale}px system-ui, sans-serif`;
     ctx.fillStyle = '#A9ABAF';
-    ctx.font = `bold ${8 * scale}px system-ui, sans-serif`;
-    ctx.fillText('PSI', 50 * scale, 85 * scale);
+    ctx.fillText(Math.round(minVal), x + 24.5 * scale, y + 71 * scale);
+    ctx.fillText(Math.round(maxVal), x + 75.5 * scale, y + 71 * scale);
 
-    // Title
-    ctx.fillStyle = '#E8E6E7';
+    // Label (Top)
+    // Split lines if needed (simple approach here)
     ctx.font = `bold ${10 * scale}px system-ui, sans-serif`;
-    ctx.fillText(`#${index}`, 50 * scale, 22 * scale);
+    ctx.fillStyle = '#E8E6E7';
+    // Use ID/Title if available or generic
+    const title = `#${index + 1}`; 
+    ctx.fillText(title, x + 50 * scale, y + 28 * scale);
 
-    // --- 5. Needle ---
-    const needleAng = getAngle(value, minVal, maxVal);
-    const rTip = 35 * innerScale; 
-    const rBase = -8 * innerScale; // Tail length
-    const baseWidth = 3 * innerScale;
-    
-    // Needle pivot is at tickCenter (50, 63)
-    const nCx = tickCenter.x;
-    const nCy = tickCenter.y;
+    // Value (Bottom)
+    ctx.font = `bold ${10 * scale}px system-ui, sans-serif`;
+    ctx.fillStyle = '#A9ABAF';
+    const valStr = Math.abs(value) < 10 && value % 1 !== 0 ? value.toFixed(1) : Math.floor(value).toString();
+    ctx.fillText(valStr, x + 50 * scale, y + 79 * scale);
 
-    // Needle Shape
-    // Calculate perpendicular offset for base width
-    const dx = Math.cos(needleAng);
-    const dy = Math.sin(needleAng);
-    const pdx = -dy * (baseWidth / 2);
-    const pdy = dx * (baseWidth / 2);
+    // Units
+    ctx.font = `bold ${6 * scale}px system-ui, sans-serif`;
+    ctx.fillText('PSI', x + 50 * scale, y + 86 * scale);
 
-    ctx.beginPath();
-    // Tip
-    ctx.moveTo(nCx + dx * rTip, nCy + dy * rTip);
-    // Base Right
-    ctx.lineTo(nCx + dx * rBase + pdx, nCy + dy * rBase + pdy);
-    // Base Left
-    ctx.lineTo(nCx + dx * rBase - pdx, nCy + dy * rBase - pdy);
-    ctx.closePath();
-    
-    ctx.fillStyle = '#E8E6E7'; // White needle
-    ctx.fill();
+    // --- 5. Needle (Rotated Sprite) ---
+    if (sprites) {
+        const needleAng = getAngle(value, minVal, maxVal);
+        // Needle is pivoted at 50,63 (gcx, gcy)
+        // Sprite is drawn at 0 degrees (UP) centered at 50,50.
+        // We need to translate to pivot, rotate, then draw sprite such that its pivot matches.
+        // Sprite Pivot: 50, 50.
+        // Target Pivot: gcx, gcy.
+        
+        ctx.save();
+        ctx.translate(gcx, gcy);
+        ctx.rotate(needleAng); // needleAng is radians, 0 is RIGHT usually.
+        // getAngle returns radians where 0 is Right. 
+        // Our sprite is drawn UP (angle -90).
+        // So we need to rotate by (needleAng + 90 deg).
+        ctx.rotate(90 * Math.PI / 180); 
+        
+        // Draw sprite centered
+        ctx.drawImage(sprites.needle, -size/2, -size/2, size, size);
+        ctx.restore();
+    }
 
-    // Pivot Cap
-    ctx.beginPath();
-    ctx.arc(nCx, nCy, 6 * innerScale, 0, 2 * Math.PI);
-    ctx.fillStyle = '#0a0a0a'; // Black center
-    ctx.fill();
-    ctx.strokeStyle = '#333';
-    ctx.lineWidth = 1 * innerScale;
-    ctx.stroke();
-
-    ctx.restore();
+    // --- 6. Glass Overlay (Cached Sprite) ---
+    if (sprites) {
+        ctx.save();
+        ctx.globalAlpha = 0.5;
+        ctx.drawImage(sprites.glass, x, y, size, size);
+        ctx.restore();
+    }
   }
 
   function render() {
@@ -465,14 +440,8 @@
   $: if (configs && ctx) requestRender(); // Re-render if configs change
 
   onMount(() => {
-    // Load background image
-    bgImage = new Image();
-    bgImage.src = './gauge-background.svg';
-    bgImage.onload = () => {
-        bgImageLoaded = true;
-        requestRender();
-    };
-
+    // Sprites generated in resize or on demand
+    
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(canvas.parentElement);
     resize();
