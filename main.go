@@ -132,17 +132,12 @@ func init() {
 			offset := (rand.Float64() * 10) - 5 // -5 to +5
 			scale := (rand.Float64() * 4) + 1   // +1 to +5
 
-			// DisplayMax: (100 * Scale) * 1.25 rounded up to nearest 5
-			rawMax := (100.0 * math.Abs(scale)) * 1.25
+			// DisplayMax: 100 * Scale + Offset
+			rawMax := (100.0 * math.Abs(scale)) + offset
 			displayMax := math.Ceil(rawMax/5.0) * 5.0
 
-			// DisplayMin: 0 - Offset * 1.25 rounded down to nearest 5
-			// Wait, logic check: "0 - Offset * 1.25" or "(0 - Offset) * 1.25"?
-			// Assuming "DisplayMin to be 0 - Offset * 1.25" means "0 minus (Offset * 1.25)"
-			// Actually, let's assume it scales similarly to Max but relative to 0.
-			// Or maybe it meant (0 + Offset) * scale?
-			// Let's stick to the prompt literal: 0 - (Offset * 1.25)
-			rawMin := 0.0 - (offset * 1.25)
+			// DisplayMin: Offset
+			rawMin := offset
 			displayMin := math.Floor(rawMin/5.0) * 5.0
 			
 			// Ensure Min < Max

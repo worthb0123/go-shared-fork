@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <defs>
+    <!-- Main Gauge Face (Substituted) -->
+    <radialGradient id="01JRPTFJ0HQ0T310GM1MRCBFFX" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
+      <stop offset="0%" stop-color="#2b3036" />
+      <stop offset="90%" stop-color="#1a1d21" />
+      <stop offset="100%" stop-color="#000000" />
+    </radialGradient>
+
+    <!-- Rim 1 -->
+    <linearGradient id="u01JRPTFJ0H386E2TY2F09DQTXD" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5F6A72" />
+      <stop offset="40%" stop-color="#090E13" />
+    </linearGradient>
+
+    <!-- Rim 2 -->
+    <linearGradient id="u01JRPTFJ0HGA59PQZW3HV70NFG" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#333F47" />
+      <stop offset="40%" stop-color="#090F14" />
+    </linearGradient>
+
+    <!-- Rim 3 (ID Fixed to match usage: added 'H') -->
+    <linearGradient id="u01JRPTFJ0HGFVTAKJXF2D1QSMK" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#061119" />
+      <stop offset="100%" stop-color="#1F282F" />
+    </linearGradient>
+
+    <!-- Inner Ring Default -->
+    <linearGradient id="u01JRPTFJ0J5SDS8D17V29QAVDA" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#CCC" />
+      <stop offset="75%" stop-color="#040910" />
+    </linearGradient>
+
+    <!-- Pivot Cap -->
+    <linearGradient id="u01JRPTFJ0JXAQ5G2AM22E9V5PJ" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4D565B" />
+      <stop offset="100%" stop-color="#0C0E12" />
+    </linearGradient>
+    
+    <!-- Needle Gradient (In case we need it later, though needle is drawn in canvas) -->
+    <linearGradient id="u01JRN9714WS1C8ZAJSPP7QFZKK" x1="50%" y1="0%" x2="50%" y2="100%">
+        <stop offset="0%" stop-color="#666" />
+        <stop offset="70%" stop-color="white" />
+        <stop offset="100%" stop-color="#666" />
+    </linearGradient>
+  </defs>
+
+  <!-- Main Background Face -->
+  <circle cx="50" cy="50" r="48" stroke="none" fill="url(#01JRPTFJ0HQ0T310GM1MRCBFFX)" />
+
+  <!-- Outer Rim -->
+  <circle cx="50" cy="50" r="48" stroke="url(#u01JRPTFJ0H386E2TY2F09DQTXD)" stroke-width="1" fill="none" />
+
+  <!-- Inner Rim 1 -->
+  <circle cx="50" cy="50" r="46.3" stroke="url(#u01JRPTFJ0HGA59PQZW3HV70NFG)" stroke-width="2.5" fill="none" />
+
+  <!-- Inner Rim 2 -->
+  <circle cx="50" cy="50" r="44.4" stroke="url(#u01JRPTFJ0HGFVTAKJXF2D1QSMK)" stroke-width="1.5" fill="none" />
+
+  <!-- Dark Ring -->
+  <circle cx="50" cy="50" r="41.9" stroke="#040910" stroke-width="1.5" fill="none" />
+
+  <!-- Inner Thin Ring (Default/Inactive) -->
+  <circle cx="50" cy="50" r="40.5" stroke="url(#u01JRPTFJ0J5SDS8D17V29QAVDA)" stroke-width="1" fill="none" />
+
+  <!-- Ticks -->
+  <path d="M 19.470959656621552,68.38309350767484 A 31,31 0 0,1 19.38166144155073,67.84946841624715 L 23.33241480393128,67.22373055608622 A 27,27 0 0,0 23.410190668670385,67.68850079700712 Z M 19.42514635234583,57.88352421831898 A 31,31 0 0,1 19.51909786551741,57.35069870974342 L 23.45211749577323,58.07964081171201 A 27,27 0 0,0 23.370288758494755,58.54371464176169 Z M 23.01897342586311,47.73486963679252 A 31,31 0 0,1 23.289496026312705,47.26631074821816 L 26.736012668078807,49.29646420006098 A 27,27 0 0,0 26.500396209622707,49.70456387720638 Z M 29.86711050176431,39.427415066399035 A 31,31 0 0,1 30.281575171389324,39.07963791498067 L 32.825888052500375,42.16613624853156 A 27,27 0 0,0 32.464902695085044,42.469038928799165 Z M 39.143571180956506,33.963162133299676 A 31,31 0 0,1 39.6519873637531,33.778113776142476 L 40.98721480068818,37.54867974051119 A 27,27 0 0,0 40.54440070599438,37.70985089029327 Z M 49.72947739955041,32.001180385010684 A 31,31 0 0,1 50.27052260044959,32.001180385010684 L 50.23561645845609,36.00102807726738 A 27,27 0 0,0 49.76438354154391,36.00102807726738 Z M 60.34801263624691,33.778113776142476 A 31,31 0 0,1 60.85642881904349,33.963162133299676 L 59.45559929400562,37.70985089029327 A 27,27 0 0,0 59.01278519931182,37.54867974051119 Z M 69.71842482861068,39.07963791498068 A 31,31 0 0,1 70.1328894982357,39.427415066399035 L 67.53509730491496,42.469038928799165 A 27,27 0 0,0 67.17411194749963,42.16613624853156 Z M 76.7105039736873,47.266310748218174 A 31,31 0 0,1 76.98102657413689,47.734869636792524 L 73.4996037903773,49.70456387720639 A 27,27 0 0,0 73.2639873319212,49.29646420006099 Z M 80.48090213448259,57.350698709743426 A 31,31 0 0,1 80.57485364765418,57.883524218318996 L 76.62971124150525,58.5437146417617 A 27,27 0 0,0 76.54788250422678,58.07964081171202 Z M 80.61833855844927,67.84946841624716 A 31,31 0 0,1 80.52904034337845,68.38309350767484 L 76.58980933132962,67.68850079700712 A 27,27 0 0,0 76.66758519606873,67.22373055608624 Z" fill="#A9ABAF" />
+
+  <!-- Center Pivot Cap -->
+  <circle cx="50" cy="63" r="5" stroke="url(#u01JRPTFJ0JXAQ5G2AM22E9V5PJ)" stroke-width="0.75" fill="#040910" />
+</svg>

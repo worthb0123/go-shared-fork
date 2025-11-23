@@ -17,6 +17,8 @@
   let renderScrollTop = 0;
   let rafId;
   let scroller;
+  let bgImage;
+  let bgImageLoaded = false;
   
   // Turbo Scroll State
   let wheelMomentum = 0;
@@ -131,72 +133,93 @@
     // Reduce scale for internal elements to create clearance
     const innerScale = scale * 0.92; 
     
-    // Transform context to gauge top-left to make math easier? 
-    // Or just work with offset. Let's work with offset.
-    // Actually, translating the context is cleaner.
+    // --- Color Theme Selection ---
+    // Assign theme based on index to ensure stability (random-looking but deterministic)
+    // Theme 0: Amber/Red (Standard)
+    // Theme 1: Orange/Purple
+    // Theme 2: Blue/Green
+    const themeIndex = index % 3;
+    
+    let warnColor, faultColor;
+    
+    if (themeIndex === 0) {
+        warnColor = '#f59e0b'; // Amber
+        faultColor = '#ef4444'; // Red
+    } else if (themeIndex === 1) {
+        warnColor = '#f97316'; // Orange
+        faultColor = '#d946ef'; // Purple (Fuchsia)
+    } else {
+        warnColor = '#3b82f6'; // Blue
+        faultColor = '#10b981'; // Emerald/Green
+    }
+
     ctx.save();
     ctx.translate(x, y);
     
-    // --- 1. Background & Rim ---
-    // Outer Rim Body
-    ctx.beginPath();
-    ctx.arc(50 * scale, 50 * scale, 48 * scale, 0, 2 * Math.PI);
-    ctx.fillStyle = '#1a1c21'; // Dark background
-    ctx.fill();
-    
-    // Background Glow (Restricted to Gauge Arc)
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(50 * scale, 63 * scale); // Pivot
-    // Arc from minAngle to maxAngle at a large radius
-    ctx.arc(50 * scale, 63 * scale, 60 * scale, startAngleRad, endAngleRad); 
-    ctx.closePath();
-    ctx.clip(); // Restrict drawing to this wedge
-
-    const gradient = ctx.createRadialGradient(50 * scale, 63 * scale, 10 * scale, 50 * scale, 63 * scale, 45 * scale);
-    
-    // Convert hex baseColor to rgba for gradient
-    // Quick hex to rgb conversion
-    let r=245, g=158, b=11;
-    if (baseColor.startsWith('#')) {
-        const hex = baseColor.substring(1);
-        if (hex.length === 6) {
-            r = parseInt(hex.substr(0,2), 16);
-            g = parseInt(hex.substr(2,2), 16);
-            b = parseInt(hex.substr(4,2), 16);
-        }
+    // --- 1. Background (Cached SVG) ---
+    if (bgImageLoaded && bgImage) {
+        ctx.drawImage(bgImage, 0, 0, size, size);
+    } else {
+        // Fallback if image not loaded yet
+        ctx.beginPath();
+        ctx.arc(50 * scale, 50 * scale, 48 * scale, 0, 2 * Math.PI);
+        ctx.fillStyle = '#1a1c21';
+        ctx.fill();
     }
-    
-    gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.25)`); // Sharper/Brighter center
-    gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);   // Fade out
-    ctx.fillStyle = gradient;
-    // Fill a large rect to cover the clipped area
-    ctx.fillRect(0, 0, 100 * scale, 100 * scale);
-    ctx.restore(); // Remove clip
-    
-    // Outer "Metallic" Bevel Rim
-    // Simulating top-left light source
-    const rimGradient = ctx.createLinearGradient(0, 0, 100 * scale, 100 * scale);
-    rimGradient.addColorStop(0, '#999'); // Highlight top-left (Lighter)
-    rimGradient.addColorStop(0.5, '#222');
-    rimGradient.addColorStop(1, '#000'); // Shadow bottom-right
-    
-    ctx.beginPath();
-    ctx.arc(50 * scale, 50 * scale, 48 * scale, 0, 2 * Math.PI);
-    ctx.strokeStyle = rimGradient;
-    ctx.lineWidth = 2.5 * scale;
-    ctx.stroke();
-
-    // Inner Highlight Ring (Colored circle inside the rim)
-    ctx.beginPath();
-    ctx.arc(50 * scale, 50 * scale, 46 * scale, 0, 2 * Math.PI);
-    ctx.strokeStyle = highlightColor;
-    ctx.lineWidth = 0.75 * scale; 
-    ctx.stroke();
 
     // --- 2. Active/Warning Range Arcs ---
     // Use innerScale for these to shrink them away from the rim
     const arcR = 35 * innerScale; // Radius for the colored bars
+    
+    // Determine Active Color State
+    let activeStateColor = null;
+    if (value >= highFault || value <= lowFault) activeStateColor = faultColor;
+    else if (value >= highWarn || value <= lowWarn) activeStateColor = warnColor;
+
+    // --- Dynamic Glow (Center out) ---
+    if (activeStateColor) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(50 * scale, 63 * scale); // Pivot center
+        // Create a pie slice clipping region
+        ctx.arc(50 * scale, 63 * scale, 48 * scale, startAngleRad, endAngleRad);
+        ctx.closePath();
+        ctx.clip();
+
+        // Gradient: Pivot -> Out
+        const glowGrad = ctx.createRadialGradient(50 * scale, 63 * scale, 0, 50 * scale, 63 * scale, 40 * scale);
+        // Parse hex to rgba for transparency
+        // Simple hex parser for known colors
+        let r=0, g=0, b=0;
+        
+        // Generic Hex Parser
+        if (activeStateColor.startsWith('#')) {
+             const hex = activeStateColor.substring(1);
+             if (hex.length === 6) {
+                 r = parseInt(hex.substr(0,2), 16);
+                 g = parseInt(hex.substr(2,2), 16);
+                 b = parseInt(hex.substr(4,2), 16);
+             }
+        }
+        
+        glowGrad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.4)`);
+        glowGrad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+        
+        ctx.fillStyle = glowGrad;
+        ctx.fillRect(0, 0, 100 * scale, 100 * scale);
+        ctx.restore();
+    }
+
+    // --- Dynamic Bezel Ring ---
+    // If active, draw a colored ring over the default one in the background
+    if (activeStateColor) {
+        ctx.beginPath();
+        ctx.arc(50 * scale, 50 * scale, 40.5 * scale, 0, 2 * Math.PI);
+        ctx.strokeStyle = activeStateColor;
+        ctx.lineWidth = 1 * scale;
+        ctx.stroke();
+    }
+
     ctx.lineCap = 'butt';
     ctx.lineWidth = 3 * innerScale;
     
@@ -214,49 +237,17 @@
 
     // Draw ranges
     // Low Fault (Min to LowFault)
-    if (lowFault > minVal) drawRangeArc(minVal, lowFault, '#ef4444');
+    if (lowFault > minVal) drawRangeArc(minVal, lowFault, faultColor);
     // Low Warn (LowFault to LowWarn)
-    if (lowWarn > lowFault) drawRangeArc(lowFault, lowWarn, '#f59e0b');
+    if (lowWarn > lowFault) drawRangeArc(lowFault, lowWarn, warnColor);
     
     // High Warn (HighWarn to HighFault)
-    if (highFault > highWarn) drawRangeArc(highWarn, highFault, '#f59e0b');
+    if (highFault > highWarn) drawRangeArc(highWarn, highFault, warnColor);
     // High Fault (HighFault to Max)
-    if (maxVal > highFault) drawRangeArc(highFault, maxVal, '#ef4444');
+    if (maxVal > highFault) drawRangeArc(highFault, maxVal, faultColor);
     
-    // --- 3. Ticks ---
-    const gr1 = 28 * innerScale; // Inner radius 
-    const gr2 = 32 * innerScale; // Outer radius
+    // --- 3. Ticks (Handled by SVG Background) ---
     const tickCenter = { x: 50 * scale, y: 63 * scale };
-    
-    ctx.strokeStyle = '#A9ABAF';
-    ctx.lineWidth = 1 * innerScale; 
-    
-    // Draw major ticks
-    // Calculate step based on range
-    const range = maxVal - minVal;
-    let step = 20;
-    if (range <= 10) step = 1;
-    else if (range <= 50) step = 5;
-    else if (range <= 100) step = 10;
-    else step = 20;
-
-    for (let val = minVal; val <= maxVal; val += step) {
-        const angle = getAngle(val, minVal, maxVal); // Returns radians
-        // wait, getAngle returns radians.
-        // existing code expected angle in degrees loop?
-        // "for (let ang = minAngle; ang <= maxAngle; ang += 20)"
-        // Yes, existing code iterated angles. Now we iterate values.
-        
-        const x1 = tickCenter.x + gr1 * Math.cos(angle);
-        const y1 = tickCenter.y + gr1 * Math.sin(angle);
-        const x2 = tickCenter.x + gr2 * Math.cos(angle);
-        const y2 = tickCenter.y + gr2 * Math.sin(angle);
-        
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.stroke();
-    }
 
     // --- 4. Labels ---
     ctx.textAlign = 'center';
@@ -474,6 +465,14 @@
   $: if (configs && ctx) requestRender(); // Re-render if configs change
 
   onMount(() => {
+    // Load background image
+    bgImage = new Image();
+    bgImage.src = './gauge-background.svg';
+    bgImage.onload = () => {
+        bgImageLoaded = true;
+        requestRender();
+    };
+
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(canvas.parentElement);
     resize();
